@@ -1,0 +1,14 @@
+body { font-family: Arial, sans-serif; margin: 24px; }
+.container { max-width: 800px; margin: 0 auto; }
+.upload { margin-bottom: 16px; }
+.chat { border-top: 1px solid #eee; padding-top: 12px; }
+.message { background:#f7f7f7; padding:8px; margin:8px 0; border-radius:6px }
+.status { color:#555; margin-top:8px }
+
+/* Message types */
+.user-message { background: transparent; padding: 0; }
+.user-prompt { font-weight: 600; margin-bottom: 6px; }
+.assistant-message { background: #f1f5f9; }
+.assistant-reply { color: #111; }
+.info { background: #eef6ff; color: #03396c }
+.error { background: #ffecec; color: #7a1f1f }
