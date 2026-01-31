@@ -19,6 +19,10 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 
 @dataclass
 class Config:

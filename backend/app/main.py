@@ -7,6 +7,10 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, R
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()  # This must be called before importing other modules that use os.getenv()
+
 from app.services.storage import Storage
 from app.services.extractor import extract_text_from_bytes
 from app.services.llm_adapter import OllamaAdapter

@@ -56,6 +56,13 @@ All notable changes to this project are recorded here with timestamps (UTC).
 - backend: enhanced LLM prompt with pronoun resolution instructions - when user refers to candidate using pronouns (he/she/they/his/her/their), the LLM now understands these refer to the resume candidate.
 - backend: improved context instruction for more natural conversation about candidate resumes.
 
+2026-01-31T08:00:00Z - Critical fix: Environment variables now loading correctly
+- backend: added `load_dotenv()` call in `app/main.py` to load .env file at startup.
+- backend: added `load_dotenv()` call in `app/config.py` for configuration module.
+- fix: Database connections now use PostgreSQL and MongoDB as configured in .env instead of SQLite fallback.
+- backend: created `diagnose_databases.py` script to test database connections and help troubleshoot storage issues.
+- docs: Environment variables were configured but not being loaded - now fixed and verified working.
+
 2026-01-31T05:00:00Z - Frontend redesign to match modern UI + backend diagnostics
 - frontend: Complete UI overhaul to match modern design aesthetic:
   - Replaced file input with + icon button (hidden file input triggered by label)
