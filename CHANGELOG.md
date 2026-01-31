@@ -30,6 +30,11 @@ All notable changes to this project are recorded here with timestamps (UTC).
 - frontend: added `frontend/src/NLCrud.jsx` and integrated into the main app to allow parsing and confirming NL CRUD commands.
 - backend: added diagnostic endpoints `GET /api/storage-status` and `GET /api/db-status` to help debug MongoDB/Postgres connectivity and storage health.
 
+2026-01-31T04:15:00Z - Frontend: smooth scrolling and UX polish
+- frontend: added a smooth-scroll behavior for the chat pane so new messages animate into view instead of jumping. The scroll now applies a small offset (approx. 40–48px) so the newest QA pair is visually pinned above the bottom input/controls rather than hugging the edge.
+- frontend: scrolling uses a short deferred scroll (60ms) to allow layout to settle (fonts/images), and falls back to manual setting if smooth scroll isn't supported.
+- frontend: improved message ordering and rendering to better support QA grouping and timestamping.
+
 - backend: added `app/services/embeddings.py` using sentence-transformers to produce normalized embeddings.
 - backend: added `app/services/vectorstore_faiss.py` which persists a FAISS index and metadata under `data/faiss/`.
 - backend: `process_cv` now chunks extracted text and indexes chunks into FAISS under the employee id; job metadata records chunk counts.

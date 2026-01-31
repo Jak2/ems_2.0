@@ -66,6 +66,67 @@ POC A planned a modular pipeline (FastAPI + BackgroundTasks, local Ollama, PDF e
 - Partially implemented: Chat enrichment via Employee.raw_text (works when employee_id is provided). Frontend shows prompts and replies.
 - Pending: Embeddings & FAISS (RAG), OCR fallback, robust CRUD-by-NL behavior, tests, and deployment hardening.
 
+Full POC A feature checklist (requested/targeted features)
+------------------------------------------------------
+Below is a detailed list of features and functionality that were scoped for "POC A" along with the current status (Done / Partial / Pending). Use this as a single-source checklist for what's implemented and what remains.
+
+- Ingest & storage
+   - Accept PDF resumes via HTTP upload endpoint (POST /api/upload-cv). — Done
+   - Store raw PDF (GridFS when MONGO_URI available, local filesystem fallback). — Done (storage adapter implemented; verify configured MONGO_URI to use GridFS)
+   - Job artifacts: write prompts, extracted text, metadata under `data/jobs/{job_id}.*`. — Done
+
+- PDF processing & extraction
+   - Extract candidate text using `pdfplumber`. — Done
+   - OCR fallback via `pytesseract` + `Pillow` when initial extraction yields no text. — Partially Done (fallback implemented; requires host Tesseract binary to be installed)
+   - Chunking of resume text for embeddings/indexing. — Done (chunking present in pipeline)
+
+- LLM extraction & adapters
+   - Ollama adapter (HTTP endpoint or CLI fallback). — Done
+   - LLM-driven structured extraction (JSON with pydantic validation for name/email/phone/etc.). — Done
+   - Prompt logging for both extraction and chat (timestamped under `data/prompts/`). — Done
+
+- Embeddings, indexing & RAG
+   - Embeddings via `sentence-transformers` (normalized vectors). — Done (service wrapper present)
+   - FAISS vectorstore for chunk retrieval and persistence on disk. — Done (FAISS index and metadata persisted under `data/faiss/`)
+   - RAG retrieval in chat endpoint to prepend top-k chunks for a given employee_id. — Done (chat performs retrieval when employee_id provided)
+
+- Chat & UI
+   - Chat endpoint (POST /api/chat) that accepts { prompt, employee_id? } and returns { reply }. — Done
+   - Frontend single-step flow: pick a PDF, press Enter/Send — file uploads, is processed, and subsequent chat requests are enriched by the employee_id. — Done (frontend has merged upload+send flow)
+   - UI niceties: '+' file picker, Enter to send, spinner while LLM thinking, message types (user/assistant/info/error), QA grouping, timestamps, dark-mode toggle. — Partial/Done (core pieces implemented; some styling still pending full Tailwind migration)
+   - Smooth scrolling + offset so newest QA doesn't hug the bottom edge. — Done (smooth scroll implemented in `frontend/src/App.jsx`)
+
+- CRUD-by-NL
+   - Endpoint to parse natural-language CRUD commands into a pending JSON proposal (`POST /api/nl-command`). — Done
+   - Endpoints to view pending proposals and confirm (`GET /api/nl/{pending_id}`, `POST /api/nl/{pending_id}/confirm`). — Done
+   - Frontend component to issue NL commands and confirm proposed DB updates. — Done (basic UI exists; more UX polish possible)
+
+- Background processing & scaling
+   - BackgroundTasks-based PoC processing pipeline for ingestion (FastAPI BackgroundTasks). — Done
+   - Plan/adapter to swap to Celery + Redis for production. — Pending (design notes present; not wired)
+
+- DB & migrations
+   - SQLAlchemy models for `employees` with SQLite fallback. — Done
+   - Option to use Postgres via DATABASE_URL env var. — Done (supported by session config)
+   - Alembic migrations (recommended next step). — Pending
+
+- Diagnostics & ops
+   - Diagnostic endpoints for storage/db health (`GET /api/storage-status`, `GET /api/db-status`). — Done
+   - Chat debug endpoint to exercise LLM + RAG quickly (`/api/chat-debug`). — Done
+   - Logging of prompts and job metadata to help reproduce/explain LLM output. — Done
+
+- Tests, docs, CI
+   - Unit tests for extractor, llm adapter, and vectorstore. — Pending
+   - End-to-end smoke test for upload→ingest→chat flow. — Pending
+   - Project docs and a readable changelog (this file + `CHANGELOG.md`). — Done (basic docs updated here)
+
+- Security & production hardening
+   - Authentication/authorization for APIs. — Pending
+   - TLS, rate limiting, input validation hardening. — Pending
+   - Secrets management for LLM endpoints and DB credentials. — Pending
+
+If you'd like, I can start turning any of the Pending items into concrete PR-sized tasks. Suggested next high-impact work: (1) wire Celery + Redis for robust background jobs, (2) add Alembic migrations and a simple test suite, or (3) finish the frontend Tailwind migration and convert legacy styles to utility classes.
+
 Approximate feature count:
 - Total POC A target features: ~10 major items (ingest, extractor, storage, LLM adapter, embeddings/indexing, RAG, CRUD-by-NL, UI, background queue, logging/ops).
 - Implemented: ~5-6 (ingest, extractor, storage, LLM adapter, UI, structured extraction, logging).
