@@ -92,10 +92,16 @@ export default function Upload({ onNewMessage }) {
   async function handleChat(e) {
     e.preventDefault()
     if (!prompt) return
+    
+    const currentPrompt = prompt
     setStatus("Sending prompt...")
+    
+    // Clear the input box immediately after user hits enter
+    setPrompt("")
+    
     try {
       // show the user's prompt above the reply in the UI
-      onNewMessage({ type: "user", text: prompt })
+      onNewMessage({ type: "user", text: currentPrompt })
 
       // If a file is selected and not yet processed, upload it first (merged behavior)
       if (file && !employeeId && !isProcessing) {
@@ -111,7 +117,7 @@ export default function Upload({ onNewMessage }) {
       const res = await fetch(`${base}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, employee_id: employeeId }),
+        body: JSON.stringify({ prompt: currentPrompt, employee_id: employeeId }),
       })
 
       if (!res.ok) {

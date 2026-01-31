@@ -329,10 +329,28 @@ async def chat(request: Request, req: ChatRequest | None = None):
                 except Exception:
                     retrieved = []
                 retrieved_text = "\n\n---\n\n".join([r.get("text", "") for r in retrieved])
+                
+                # Enhanced prompt with pronoun resolution instructions
+                context_instruction = (
+                    "You are answering questions about a candidate's resume. "
+                    "When the user uses pronouns like 'he', 'she', 'they', 'him', 'her', 'his', 'their', etc., "
+                    "they are referring to the candidate in the resume provided below. "
+                    "Answer naturally and interpret pronouns as referring to this candidate.\n\n"
+                )
+                
                 if retrieved_text.strip():
-                    prompt = f"Relevant resume excerpts:\n{retrieved_text}\n\nEmployee record:\n{emp.raw_text[:1000]}\n\nUser prompt:\n{req.prompt}"
+                    prompt = (
+                        f"{context_instruction}"
+                        f"Relevant resume excerpts:\n{retrieved_text}\n\n"
+                        f"Full candidate record:\n{emp.raw_text[:1000]}\n\n"
+                        f"User question:\n{req.prompt}"
+                    )
                 else:
-                    prompt = f"Employee record:\n{emp.raw_text[:1000]}\n\nUser prompt:\n{req.prompt}"
+                    prompt = (
+                        f"{context_instruction}"
+                        f"Candidate record:\n{emp.raw_text[:1000]}\n\n"
+                        f"User question:\n{req.prompt}"
+                    )
         finally:
             db.close()
 

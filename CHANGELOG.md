@@ -42,6 +42,20 @@ All notable changes to this project are recorded here with timestamps (UTC).
 - frontend: centered assistant response messages for better readability and visual balance.
 - frontend: improved overall layout with proper scroll containment and viewport-height-based flex layout.
 
+2026-01-31T06:00:00Z - Environment configuration system
+- project: added comprehensive `.env` files for both backend and frontend with all connection configurations.
+- backend: created `backend/.env` and `backend/.env.example` with settings for database (PostgreSQL/SQLite), MongoDB (GridFS), Ollama LLM, file processing, embeddings, CORS, logging, and security.
+- frontend: created `frontend/.env` and `frontend/.env.example` with settings for API endpoints, UI configuration, feature flags, polling, and analytics.
+- docs: added `ENV_SETUP_GUIDE.md` - comprehensive guide covering configuration reference, common scenarios, security best practices, troubleshooting, and advanced usage.
+- project: all sensitive configuration now managed through environment variables instead of hard-coded values.
+
+2026-01-31T07:00:00Z - UX improvements: input clearing, pronoun resolution, visual spacing
+- frontend: input box now clears immediately when user hits Enter/Send button for better UX flow.
+- frontend: added 80px bottom padding to chat area to prevent messages from hiding under the fixed input box.
+- frontend: visual gap between input box and message container for cleaner layout.
+- backend: enhanced LLM prompt with pronoun resolution instructions - when user refers to candidate using pronouns (he/she/they/his/her/their), the LLM now understands these refer to the resume candidate.
+- backend: improved context instruction for more natural conversation about candidate resumes.
+
 2026-01-31T05:00:00Z - Frontend redesign to match modern UI + backend diagnostics
 - frontend: Complete UI overhaul to match modern design aesthetic:
   - Replaced file input with + icon button (hidden file input triggered by label)
