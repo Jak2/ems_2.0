@@ -2,8 +2,23 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif; 
   margin: 0;
   padding: 0;
-  background: #c4c4c4;
-  overflow: hidden; /* Prevent body scroll */
+  /* background: #c4c4c4; */
+  /* https://grabient.com/HQdgLAzANMCsAcIYDZnygWgAzAIwE5YZcstiIAmTHWEdbYCya4SpPXIvfJBrMCkA?angle=180 */
+    /* background: linear-gradient(180deg, #989ecb 0.000%, #8ca4c6 16.667%, #92a9be 33.333%, #a7acb4 50.000%, #c4afa8 66.667%, #dfaf9d 83.333%, #eeae93 100.000%); */
+    /* https://grabient.com/HQJgHCA0wMztBGA7DaBWALE6SBsAGaXEBaEXbWXVYBATm0JGHw1Q1rDunyTBwxRgSfIQC0CYGzBA?angle=135 */
+
+/* background: linear-gradient(135deg, #000032 0.000%, #184664 50.000%, #4eb490 100.000%); */
+/* https://grabient.com/HQZg7AHANMAsFhiCBOGAmAjCDICsGsacsioexs6OmwY66Ut9jzImUAtAAzCYBssGCkzcY-CNG5A?style=linearSwatches */
+
+/* background: linear-gradient(90deg, #2e4932 0.000%, #2e4932 7.692%, #36503b calc(7.692% + 1px), #36503b 15.385%, #3e5744 calc(15.385% + 1px), #3e5744 23.077%, #465e4d calc(23.077% + 1px), #465e4d 30.769%, #4d6555 calc(30.769% + 1px), #4d6555 38.462%, #546b5c calc(38.462% + 1px), #546b5c 46.154%, #5a7163 calc(46.154% + 1px), #5a7163 53.846%, #5f7768 calc(53.846% + 1px), #5f7768 61.538%, #637c6d calc(61.538% + 1px), #637c6d 69.231%, #668070 calc(69.231% + 1px), #668070 76.923%, #688372 calc(76.923% + 1px), #688372 84.615%, #688673 calc(84.615% + 1px), #688673 92.308%, #678873 calc(92.308% + 1px) 100.000%); */
+/* https://grabient.com/HQNgTAHANMAsEFYZjLKBaADMAzARmi2DAE4QZYTDtY8wNswQSY8B2cvXJh4BE+ui6ZMOXngFRhENKEzRMQA?style=angularGradient */
+/* https://grabient.com/HQdgDArANMCcYDYawMwpgJgiTCnBQA51gAWFaYCFMGCBdUs1KJ0w6JiSIA */
+
+background-image: linear-gradient(to right top, #79afff6d, #ccd1ef97, #ddddeb9e, #e6e5f0aa, #ffffff);
+/* background: conic-gradient(from 90deg, #988f92 0.000deg, #8f8c92 25.714deg, #858891 51.429deg, #7b8491 77.143deg, #727f90 102.857deg, #687b8e 128.571deg, #5e768d 154.286deg, #54708b 180.000deg, #4b6b89 205.714deg, #426586 231.429deg, #3a6083 257.143deg, #335a80 282.857deg, #2c547d 308.571deg, #264e79 334.286deg, #214875 360.000deg); */
+/* background: conic-gradient(from 90deg, #988f92 0.000deg, #8f8c92 25.714deg, #858891 51.429deg, #7b8491 77.143deg, #727f90 102.857deg, #687b8e 128.571deg, #5e768d 154.286deg, #54708b 180.000deg, #4b6b89 205.714deg, #9ccfff 231.429deg, #3a6083 257.143deg, #87bbf0 282.857deg, #6792bc 308.571deg, #456689 334.286deg, #85b5ec 360.000deg); */
+
+overflow: hidden; /* Prevent body scroll */
 }
 
 .container { 
