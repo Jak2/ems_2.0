@@ -51,6 +51,11 @@ class Storage:
         except Exception:
             self.logger.exception("Local file save failed")
         return path
+        # fallback: save to local dir
+        path = os.path.join(self.local_dir, f"{filename}")
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
 
     def get_file(self, file_id: str) -> Optional[bytes]:
         if self.fs:

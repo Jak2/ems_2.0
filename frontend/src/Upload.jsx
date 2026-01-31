@@ -2,7 +2,7 @@ import React, { useState } from "react"
 
 // Upload component: handles PDF selection and upload, polls job status,
 // and sends chat prompts (including employee_id when available).
-export default function Upload({ onNewMessage, onBackendFound }) {
+export default function Upload({ onNewMessage }) {
   const [file, setFile] = useState(null)
   const [prompt, setPrompt] = useState("")
   const [status, setStatus] = useState("")
@@ -48,7 +48,6 @@ export default function Upload({ onNewMessage, onBackendFound }) {
         setIsProcessing(false)
         return null
       }
-      try { onBackendFound && onBackendFound(base) } catch (e) {}
       const res = await fetch(`${base}/api/upload-cv`, { method: "POST", body: fd })
       const json = await res.json()
       onNewMessage({ type: "info", text: `Uploaded ${file.name} — job ${json.job_id}` })
@@ -109,7 +108,6 @@ export default function Upload({ onNewMessage, onBackendFound }) {
         setStatus("Backend unreachable")
         return
       }
-      try { onBackendFound && onBackendFound(base) } catch (e) {}
       const res = await fetch(`${base}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

@@ -14,8 +14,3 @@ body { font-family: Arial, sans-serif; margin: 24px; }
 .error { background: #ffecec; color: #7a1f1f }
 
 .sep { height: 1px; background: #e0e0e0; margin: 12px 0; }
-
-/* Theme toggle button */
-/* theme handled via Tailwind in index.css; keep legacy small tweaks here */
-/* keep pre/code background subtle */
-pre, code { background: rgba(0,0,0,0.04); }
