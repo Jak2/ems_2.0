@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Small app-specific overrides (kept minimal) */
+body { @apply bg-white text-slate-900; }
+.container { @apply mx-auto max-w-3xl p-6; }
+.upload { @apply mb-4 }
+.chat { @apply border-t border-gray-200 pt-4 max-h-[60vh] overflow-auto }
+.message { @apply bg-gray-50 p-3 my-2 rounded-md }
+.status { @apply text-slate-600 mt-2 }
+.user-message { @apply bg-transparent p-0 }
+.user-prompt { @apply font-semibold mb-2 }
+.assistant-message { @apply bg-slate-100 }
+.assistant-reply { @apply text-slate-900 }
+.info { @apply bg-blue-50 text-sky-800 }
+.error { @apply bg-rose-50 text-rose-800 }
+.sep { @apply h-px bg-gray-200 my-3 }
+
+/* Theme toggle button */
+.theme-toggle { @apply fixed top-3 right-3 z-[1200] border rounded-md px-2 py-1 bg-white text-slate-800 shadow }
+
+/* Dark theme overrides using Tailwind's class strategy */
+.dark body { @apply bg-slate-900 text-slate-100 }
+.dark .container { }
+.dark .message { @apply bg-slate-800 }
+.dark .assistant-message { @apply bg-slate-700 }
+.dark .theme-toggle { @apply bg-slate-900 text-slate-100 border-gray-700 }

@@ -1,0 +1,69 @@
+J a y a A r u n K u m a r . T u l l u r i
+Email jayaarunkumartulluri2@gmail.com LinkedIn Jayaarunkumar tulluri Phone 80086 23789
+Professional Summary
+Senior Systems Engineer with 5+ years of experience engineering high-performance automation for complex 5G/6G
+testbeds. I specialize in the architectural transition from manual network testing to autonomous, self-optimizing
+environments using Python, Agentic AI, and Cloud-Native (K8s/Docker) stacks. My work centers on building the
+"internal infrastructure" that solves deep-domain signaling bottlenecks exemplified by my development of NFTRACE
+(REST-based tracing) and intelligent remediation engines that achieved 70% auto-resolution of failures. By
+blending FastAPI, Redis, and LangChain, I bridge the gap between low-level protocol analysis and high-level
+delivery, consistently reducing MTTR by 55% and optimizing pipeline efficiency by 50%.
+CORE COMPETENCIES
+Programming & Scripting Agentic Ai, Backend & Systems DevOps & Infrastructure:
+Languages: Architecture: ● ELK Stack (Elasticsearch,
+● SQL(MySQL, SQL Server), ● LangChain Logstash, Kibana)
+● Python, ● REST, Fast API, XML-RPG. Fundamentals.
+● Node.js, ● Celery (Task queues), ● Linux,
+● Robot Framework, ● Multiprocessing, Async ● Docker,
+● GraphQL processing. ● Kubernetes
+● Redis (session management ● AWS (AppSync, AppFlow,
+Others and filter caching) IAM),
+● Figma, ● SQLite ● Google Firebase.
+● Git, GitLab, JIRA. ● Streamlit
+Work Experience - (5 years Approx)
+INFINITE COMPUTER SOLUTIONS (Nokia-Ext) - Python Dev, Automation Tester
+(June-2025 to Present)
+Nokia In-House Tool - Agentic Ai Module For Autonomous Test Orchestration In 6g Testbeds
+● Currently working on a modular agentic AI system that autonomously orchestrates end-to-end test
+scenarios in 5G testbeds, self-optimizing based on real-time network telemetry to handle complex
+multi-vendor integrations.
+LOT3 CCTF TDG GERMANY - UDM/AUSF Testing 5G
+● Continued the project and its activities after shifting to infinite
+Nokia In-House Tool - Lightweight Pyshark Filter Library for 5G
+● Developed a lightweight Python-based Pyshark filter library for automated 5G failure detection and
+remediation, integrating into NFTRACE workflows to address signaling errors such as authentication
+timeouts, handover disruptions, and congestion reduced manual analysis time from hours to seconds
+by curating targeted display filters and real-time monitoring for latency tracking and packet drop alerts.
+● Implemented remediation engine with Redis caching for instant suggestions like configuration tweaks
+and retries, achieving 70% auto-resolution of routine errors without escalation and a 55% reduction in
+mean time to repair (MTTR); boosted core network reliability, resulting in citations in three internal
+audits and adoption by operations teams for daily use.
+● Led root-cause analysis from logs and audits, identifying that 60% of downtime stemmed from
+undetected signaling faults; completed implementation in 2 weeks, including filter curation, monitoring
+enhancements, and API hooks for seamless NFTRACE integration, saving hundreds of hours
+annually in telecom operations.
+
+Tools: Python | Pyshark | Redis (for filter caching).
+NOKIA NETWORKS - Python Dev, Automation Tester (Aug-2022 to June 2025)
+LOT3 CCTF TDG GERMANY - UDM/AUSF Testing 5G
+● Executed manual functional testing for 5G Core UDM/AUSF, analyzed R&D test specifications to
+validate signaling flows, Diameter protocol requirements and subscriber data management scenarios
+in live environments.
+● Collaborated with client and deployment teams to execute assigned activities within Agile sprints,
+ensuring the on-time completion of weekly project deliveries and alignment with production
+requirements.
+● Managed Kubernetes (K8s) pod health and availability by performing regular health checks and
+log analysis to debug microservice behavior, ensuring stable deployment of UDM/AUSF functions.
+● Designed a service dashboard for real-time monitoring of active Kubernetes counters and
+deployed services, providing the client with clear visibility into cluster health and resource utilization.
+● Facilitated daily client communication by building detailed progress reports and providing status
+updates on resolved blockers, ensuring alignment with weekly Agile project deliveries.
+● Managed high-pressure delivery timelines by providing dedicated technical support during non-office
+hours, troubleshooting blockers to maintain project velocity and meet strict deployment schedules.
+TCOE - NFTRACE A REST Based Network Function Tracing Tool for Telecom Test
+Automation
+● Architectured and implemented NFTRACE, a scalable solution for capturing, processing, and
+validating PCAP traces in VNF/CNF environments, supporting online, scheduled offline execution
+modes to optimize batch testing efficiency by up to 50% in Nokia's Continuous Delivery pipelines.
+● Designed server-side components using Python, including REST APIs for trace management
+(start/stop/merge/delete/
