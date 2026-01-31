@@ -37,11 +37,10 @@ export default function App() {
 
   return (
     <div className="container">
-  <h1>CV Chat PoC</h1>
-  <Upload onNewMessage={(m) => setMessages((s) => [m, ...s])} />
+      <h1 className="app-title">ChatBot</h1>
       <div className="chat" ref={chatRef}>
         {messages.slice().reverse().map((m, i) => {
-          // m is an object: { type: 'user'|'assistant'|'info'|'error', text }
+          // m is an object: { type: 'user'|'assistant'|'info'|'error', text, filename? }
           if (!m || typeof m !== "object") {
             return (
               <div key={i} className="message">
@@ -69,6 +68,15 @@ export default function App() {
             )
           }
 
+          if (m.type === "attachment") {
+            return (
+              <div key={i} className="message attachment-message">
+                <span className="attachment-icon">📎</span>
+                <span className="attachment-name">{m.filename}</span>
+              </div>
+            )
+          }
+
           // info / error
           return (
             <div key={i} className={`message ${m.type || "info"}`}>
@@ -77,6 +85,8 @@ export default function App() {
           )
         })}
       </div>
+      <Upload onNewMessage={(m) => setMessages((s) => [m, ...s])} />
     </div>
   )
 }
+

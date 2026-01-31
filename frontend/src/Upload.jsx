@@ -139,25 +139,45 @@ export default function Upload({ onNewMessage }) {
 
   return (
     <div className="upload">
-      <div>
-        <input type="file" accept="application/pdf" onChange={(e) => setFile(e.target.files[0])} />
-        <div style={{ fontSize: 12, color: '#666', marginTop: 6 }}>The selected file will be uploaded automatically when you press Send.</div>
-      </div>
-
-      <form onSubmit={handleChat}>
-        <input value={prompt} onChange={(e) => {
-          const v = e.target.value
-          setPrompt(v)
-          try {
-            if (v && v.trim() !== "") localStorage.setItem('global_prompt', v)
-            else localStorage.removeItem('global_prompt')
-          } catch (err) {
-            // ignore storage errors
-          }
-        }} placeholder="Ask about the CV or give an instruction" />
-        <button type="submit">Send</button>
+      <form onSubmit={handleChat} className="chat-input-container">
+        <input 
+          type="file" 
+          accept="application/pdf" 
+          onChange={(e) => {
+            const selectedFile = e.target.files[0]
+            setFile(selectedFile)
+            // Show the attached file immediately as a message
+            if (selectedFile) {
+              onNewMessage({ type: "attachment", filename: selectedFile.name })
+            }
+          }}
+          id="file-input"
+          style={{ display: 'none' }}
+        />
+        <label htmlFor="file-input" className="file-picker-btn" title="Attach PDF">
+          <span className="plus-icon">+</span>
+        </label>
+        
+        <input 
+          value={prompt} 
+          onChange={(e) => {
+            const v = e.target.value
+            setPrompt(v)
+            try {
+              if (v && v.trim() !== "") localStorage.setItem('global_prompt', v)
+              else localStorage.removeItem('global_prompt')
+            } catch (err) {
+              // ignore storage errors
+            }
+          }} 
+          placeholder="Ask anything"
+          className="prompt-input"
+        />
+        <button type="submit" className="send-btn" disabled={isProcessing}>
+          {isProcessing ? "Processing..." : "Send"}
+        </button>
       </form>
-      <div className="status">{status}</div>
+      {status && <div className="status">{status}</div>}
     </div>
   )
 }

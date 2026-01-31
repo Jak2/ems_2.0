@@ -1,16 +1,211 @@
-body { font-family: Arial, sans-serif; margin: 24px; }
-.container { max-width: 800px; margin: 0 auto; }
-.upload { margin-bottom: 16px; }
-.chat { border-top: 1px solid #eee; padding-top: 12px; }
-.message { background:#f7f7f7; padding:8px; margin:8px 0; border-radius:6px }
-.status { color:#555; margin-top:8px }
+body { 
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif; 
+  margin: 0;
+  padding: 0;
+  background: #f5f5f5;
+  overflow: hidden; /* Prevent body scroll */
+}
+
+.container { 
+  max-width: 900px; 
+  margin: 0 auto; 
+  padding: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Center the ChatBot title at the top */
+.app-title {
+  text-align: center;
+  font-size: 28px;
+  font-weight: 600;
+  margin: 0;
+  padding: 24px 0 20px;
+  color: #1a1a1a;
+  background: #f5f5f5;
+}
+
+/* Chat area - scrollable */
+.chat { 
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 24px 20px;
+  margin: 0;
+}
+
+/* Fixed input box at the bottom */
+.upload { 
+  position: sticky;
+  bottom: 0;
+  padding: 16px 24px 24px;
+  background: #f5f5f5;
+  z-index: 10;
+}
+
+.message { 
+  background: #f7f7f7; 
+  padding: 12px 16px; 
+  margin: 8px auto; 
+  border-radius: 8px;
+  max-width: 600px; /* Center responses with max width */
+}
+
+.status { 
+  color: #666; 
+  font-size: 13px;
+  margin-top: 8px;
+  text-align: center;
+}
 
 /* Message types */
-.user-message { background: transparent; padding: 0; }
-.user-prompt { font-weight: 600; margin-bottom: 6px; }
-.assistant-message { background: #f1f5f9; }
-.assistant-reply { color: #111; }
-.info { background: #eef6ff; color: #03396c }
-.error { background: #ffecec; color: #7a1f1f }
+.user-message { 
+  background: transparent; 
+  padding: 0;
+  margin-left: auto;
+  margin-right: 0;
+  max-width: 600px;
+}
+.user-prompt { 
+  font-weight: 500; 
+  margin-bottom: 6px;
+  color: #333;
+  text-align: right;
+}
+.assistant-message { 
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  margin: 8px auto; /* Center the response */
+}
+.assistant-reply { 
+  color: #1a1a1a;
+  line-height: 1.6;
+  text-align: center; /* Center text in response */
+}
+.info { 
+  background: #e3f2fd; 
+  color: #1565c0;
+  font-size: 14px;
+  margin: 8px auto;
+}
+.error { 
+  background: #ffebee; 
+  color: #c62828;
+  font-size: 14px;
+  margin: 8px auto;
+}
 
-.sep { height: 1px; background: #e0e0e0; margin: 12px 0; }
+/* Attachment message styling */
+.attachment-message {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  padding: 10px 16px;
+  margin: 8px auto;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 400px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+
+.attachment-icon {
+  font-size: 18px;
+}
+
+.attachment-name {
+  color: #333;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sep { 
+  height: 1px; 
+  background: #e8e8e8; 
+  margin: 16px 0; 
+}
+
+/* New chat input styling to match the image */
+.chat-input-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: white;
+  padding: 12px 20px;
+  border-radius: 50px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.file-picker-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: transform 0.2s ease;
+  margin: 0;
+  padding: 0;
+}
+
+.file-picker-btn:hover {
+  transform: scale(1.1);
+}
+
+.plus-icon {
+  font-size: 24px;
+  color: #666;
+  font-weight: 300;
+  line-height: 1;
+}
+
+.prompt-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 15px;
+  padding: 8px 4px;
+  background: transparent;
+  color: #333;
+}
+
+.prompt-input::placeholder {
+  color: #999;
+}
+
+.send-btn {
+  background: #000;
+  color: white;
+  border: none;
+  padding: 10px 28px;
+  border-radius: 24px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  white-space: nowrap;
+}
+
+.send-btn:hover:not(:disabled) {
+  background: #333;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  transform: translateY(-1px);
+}
+
+.send-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+
+.send-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+  box-shadow: none;
+}

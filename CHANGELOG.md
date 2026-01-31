@@ -35,6 +35,35 @@ All notable changes to this project are recorded here with timestamps (UTC).
 - frontend: scrolling uses a short deferred scroll (60ms) to allow layout to settle (fonts/images), and falls back to manual setting if smooth scroll isn't supported.
 - frontend: improved message ordering and rendering to better support QA grouping and timestamping.
 
+2026-01-31T05:00:00Z - Frontend: UI improvements (ChatBot title, attachment preview, fixed input, centered responses)
+- frontend: changed app title from "CV Chat PoC" to "ChatBot" and centered it at the top of the screen.
+- frontend: PDF attachments now appear immediately as a message when uploaded (with 📎 icon and filename), instead of only showing after processing.
+- frontend: fixed the input box to the bottom of the viewport with the chat area now scrollable above it.
+- frontend: centered assistant response messages for better readability and visual balance.
+- frontend: improved overall layout with proper scroll containment and viewport-height-based flex layout.
+
+2026-01-31T05:00:00Z - Frontend redesign to match modern UI + backend diagnostics
+- frontend: Complete UI overhaul to match modern design aesthetic:
+  - Replaced file input with + icon button (hidden file input triggered by label)
+  - Redesigned Send button with rounded corners, black background, and elevation shadow
+  - Changed input placeholder from "Ask about the CV..." to "Ask anything"
+  - Removed helper text about automatic upload
+  - Enhanced chat input container with pill-shaped design, white background, and subtle shadow
+  - Improved overall spacing, typography, and visual hierarchy
+- frontend: Updated styles.css with modern CSS including hover states, transitions, and shadow effects
+- backend: Added check_db_connection.py diagnostic script to verify:
+  - Database connectivity (SQLAlchemy connection test)
+  - Table existence and schema validation
+  - CRUD operations (create/read/update/delete test)
+  - Storage backend health (GridFS or filesystem)
+  - LLM adapter connectivity (Ollama HTTP or CLI)
+- docs: PROJECT_GUIDE.md now includes comprehensive architecture documentation:
+  - System architecture diagram showing all components and their relationships
+  - Data flow diagram: Frontend ↔ Backend ↔ Database communication
+  - Complete user journey from CV upload through CRUD operations
+  - File-by-file breakdown of responsibilities
+  - Visual representation of how RAG, embeddings, and LLM extraction work together
+
 - backend: added `app/services/embeddings.py` using sentence-transformers to produce normalized embeddings.
 - backend: added `app/services/vectorstore_faiss.py` which persists a FAISS index and metadata under `data/faiss/`.
 - backend: `process_cv` now chunks extracted text and indexes chunks into FAISS under the employee id; job metadata records chunk counts.

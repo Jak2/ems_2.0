@@ -9,6 +9,343 @@ This is a lightweight local PoC demonstrating a conversational résumé assistan
 - Storage adapter (GridFS or local fallback)
 - SQLAlchemy for employee records (SQLite fallback)
 
+Architecture
+------------
+
+### System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        CLIENT BROWSER                            │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │              React Frontend (Vite)                        │   │
+│  │  - Upload.jsx: File picker, chat input                   │   │
+│  │  - App.jsx: Message display, scroll management           │   │
+│  │  - NLCrud.jsx: Natural language CRUD UI                  │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                           │                                      │
+│                           │ HTTP/JSON (Port 8000)               │
+│                           ▼                                      │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    FASTAPI BACKEND SERVER                        │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │                     main.py (API)                         │   │
+│  │  - POST /api/upload-cv                                   │   │
+│  │  - POST /api/chat                                        │   │
+│  │  - GET  /api/job/{job_id}                               │   │
+│  │  - POST /api/nl-command                                  │   │
+│  │  - GET  /api/storage-status, /api/db-status             │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│           │              │               │           │           │
+│           ▼              ▼               ▼           ▼           │
+│  ┌──────────────┐ ┌──────────┐ ┌──────────────┐ ┌────────────┐ │
+│  │   Storage    │ │Extractor │ │  LLM Adapter │ │ Embeddings │ │
+│  │   Adapter    │ │(pdfplumb)│ │   (Ollama)   │ │(sent-trans)│ │
+│  │              │ │+ Tesseract│ │ HTTP or CLI  │ │            │ │
+│  └──────────────┘ └──────────┘ └──────────────┘ └────────────┘ │
+│           │                            │              │          │
+└───────────┼────────────────────────────┼──────────────┼──────────┘
+            ▼                            ▼              ▼
+┌─────────────────┐          ┌────────────────┐  ┌──────────────┐
+│  File Storage   │          │ Ollama Server  │  │  FAISS Index │
+│  - GridFS (opt) │          │ (Local LLM)    │  │  (Vectors)   │
+│  - Filesystem   │          │ Port 11434     │  │ data/faiss/  │
+│  data/files/    │          └────────────────┘  └──────────────┘
+└─────────────────┘
+            
+┌─────────────────────────────────────────────────────────────────┐
+│                   DATABASE LAYER                                 │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │            SQLAlchemy + DB Session                        │   │
+│  │  models.py: Employee(id, name, email, phone, raw_text)   │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                           │                                      │
+│                           ▼                                      │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │     PostgreSQL (via DATABASE_URL)                         │   │
+│  │            OR                                             │   │
+│  │     SQLite (backend_dev.db - fallback)                   │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow: Frontend ↔ Backend ↔ Database
+
+```
+FRONTEND                    BACKEND                      DATABASE/STORAGE
+────────                    ───────                      ────────────────
+
+Upload.jsx                 main.py
+   │                         │
+   │ 1. User selects PDF    │
+   │    via + button         │
+   │                         │
+   │ 2. User types prompt   │
+   │    "Ask anything"       │
+   │                         │
+   │ 3. Click "Send"        │
+   │ FormData(file, prompt) │
+   ├────────────────────────>│ POST /api/upload-cv
+   │                         │
+   │                         ├──> storage.save_file()
+   │                         │       │
+   │                         │       └───> MongoDB GridFS
+   │                         │              or data/files/
+   │                         │
+   │                         │ 4. BackgroundTasks.add_task(process_cv)
+   │                         │       │
+   │                         │       ├──> extractor.extract_text_from_bytes()
+   │                         │       │      (pdfplumber + OCR fallback)
+   │                         │       │
+   │                         │       ├──> llm.generate(extraction_prompt)
+   │                         │       │      (Ollama: parse name/email/phone)
+   │                         │       │
+   │                         │       ├──> SQLAlchemy: INSERT Employee
+   │                         │       │       │
+   │                         │       │       └───> PostgreSQL or SQLite
+   │                         │       │              (employees table)
+   │                         │       │
+   │                         │       ├──> chunk_text() + vectorstore.add_chunks()
+   │                         │       │       │
+   │                         │       │       └───> FAISS index (data/faiss/)
+   │                         │       │
+   │                         │       └──> Write job status to data/jobs/{job_id}.json
+   │                         │
+   │<────────────────────────┤ Response: { job_id, status: "queued" }
+   │                         │
+   │ 5. Poll job status      │
+   ├────────────────────────>│ GET /api/job/{job_id}
+   │                         │
+   │                         ├──> Read data/jobs/{job_id}.json
+   │                         │
+   │<────────────────────────┤ { status: "done", employee_id: 123 }
+   │                         │
+   │ 6. Send chat message    │
+   ├────────────────────────>│ POST /api/chat
+   │ { prompt, employee_id } │       { prompt, employee_id }
+   │                         │
+   │                         ├──> vectorstore.search(prompt, employee_id)
+   │                         │       │
+   │                         │       └───> FAISS: retrieve top-k chunks
+   │                         │
+   │                         ├──> SQLAlchemy: SELECT Employee WHERE id=...
+   │                         │       │
+   │                         │       └───> PostgreSQL/SQLite
+   │                         │              (fetch raw_text)
+   │                         │
+   │                         ├──> Enrich prompt with RAG chunks + raw_text
+   │                         │
+   │                         ├──> llm.generate(enriched_prompt)
+   │                         │       │
+   │                         │       └───> Ollama (qwen2.5)
+   │                         │
+   │<────────────────────────┤ { reply: "..." }
+   │                         │
+App.jsx                     │
+   │ 7. Display message      │
+   │    in chat UI           │
+   │    (smooth scroll)      │
+```
+
+### Complete User Journey: Upload CV → CRUD Operations
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ PHASE 1: CV UPLOAD & PROCESSING                                  │
+└──────────────────────────────────────────────────────────────────┘
+
+1. User Action: Click + button in Upload.jsx
+   └─> Opens file picker dialog
+
+2. User Action: Select CV.pdf and type question
+   └─> File stored in Upload.jsx state
+   └─> Question stored in prompt state
+
+3. User Action: Press "Send" button
+   └─> onSubmit handler in Upload.jsx fires
+   
+4. Frontend: uploadAndWait() function
+   Files involved: Upload.jsx
+   
+   a) Discover backend via findBackendBase()
+      - Try http://{hostname}:8000/health
+      - Try http://127.0.0.1:8000/health
+      - Try http://localhost:8000/health
+      
+   b) FormData upload to POST /api/upload-cv
+      Files involved: main.py (FastAPI endpoint)
+      
+   c) Backend: storage.save_file(contents, filename)
+      Files involved: services/storage.py
+      Database: MongoDB GridFS or data/files/ directory
+      
+   d) Backend: BackgroundTasks.add_task(process_cv, ...)
+      Files involved: main.py → process_cv function
+      
+5. Background Processing (async in process_cv)
+   
+   a) Fetch file: storage.get_file(file_id)
+      Files involved: services/storage.py
+      
+   b) Extract text: extract_text_from_bytes(data)
+      Files involved: services/extractor.py
+      Uses: pdfplumber library
+      Fallback: pytesseract OCR if no text found
+      
+   c) LLM Extraction: llm.generate(extraction_prompt)
+      Files involved: services/llm_adapter.py
+      External: Ollama server (port 11434) or CLI
+      Purpose: Parse name, email, phone from resume text
+      
+   d) Create Employee record
+      Files involved: db/models.py, db/session.py
+      Database: INSERT INTO employees (name, email, phone, raw_text)
+      SQLAlchemy commits to PostgreSQL or SQLite
+      
+   e) Chunk text and index embeddings
+      Files involved: services/embeddings.py, services/vectorstore_faiss.py
+      Process:
+        - Split text into 500-char chunks with 100-char overlap
+        - Generate embeddings using sentence-transformers
+        - Store in FAISS IndexFlatIP
+        - Persist to data/faiss/index.faiss + metadata.json
+        
+   f) Write job metadata
+      Files involved: main.py
+      Output: data/jobs/{job_id}.json with status, employee_id
+      
+6. Frontend: Job Polling
+   Files involved: Upload.jsx (polling loop)
+   
+   - Fetch GET /api/job/{job_id} every 1 second
+   - Backend reads data/jobs/{job_id}.json
+   - When status="done", extract employee_id
+   - Store employee_id in Upload component state
+   - Display success message in App.jsx message list
+
+┌──────────────────────────────────────────────────────────────────┐
+│ PHASE 2: CHAT WITH RAG                                           │
+└──────────────────────────────────────────────────────────────────┘
+
+7. User Action: Type new question and press Send
+   Files involved: Upload.jsx (handleChat function)
+   
+   a) POST /api/chat with { prompt, employee_id }
+      Files involved: main.py (chat endpoint)
+      
+   b) RAG Retrieval: vectorstore.search(prompt, employee_id)
+      Files involved: services/vectorstore_faiss.py
+      Process:
+        - Generate embedding for user prompt
+        - Search FAISS index for top-k similar chunks
+        - Filter by employee_id metadata
+        - Return relevant text excerpts
+        
+   c) Fetch employee record: db.query(Employee).filter_by(id=...)
+      Files involved: db/session.py, db/models.py
+      Database: SELECT * FROM employees WHERE id = employee_id
+      
+   d) Enrich prompt:
+      "Relevant resume excerpts:\n{RAG chunks}\n
+       Employee record:\n{raw_text[:1000]}\n
+       User prompt:\n{original prompt}"
+       
+   e) LLM Generation: llm.generate(enriched_prompt)
+      Files involved: services/llm_adapter.py
+      External: Ollama server
+      
+   f) Log prompt: data/prompts/chat_{timestamp}.json
+      
+   g) Return { reply: "..." } to frontend
+   
+8. Frontend: Display reply
+   Files involved: App.jsx
+   
+   - Add user message to messages state (type: "user")
+   - Add assistant reply to messages state (type: "assistant")
+   - Smooth scroll with offset (scrollToBottom function)
+   - Messages render with QA grouping
+
+┌──────────────────────────────────────────────────────────────────┐
+│ PHASE 3: NATURAL LANGUAGE CRUD                                   │
+└──────────────────────────────────────────────────────────────────┘
+
+9. User Action: Type NL command in NLCrud.jsx
+   Example: "Update employee 5's email to john@example.com"
+   Files involved: NLCrud.jsx
+   
+   a) POST /api/nl-command with { command: "..." }
+      Files involved: main.py (nl_command endpoint)
+      
+   b) LLM Parsing: llm.generate(parse_prompt)
+      Purpose: Convert NL to JSON action spec
+      Output: { action: "update", employee_id: 5, 
+                fields: { email: "john@example.com" } }
+      
+   c) Save proposal: data/jobs/nl_{pending_id}.json
+      
+   d) Return { pending_id, proposal } to frontend
+   
+10. User Action: Review and click "Confirm" in NLCrud.jsx
+    Files involved: NLCrud.jsx
+    
+    a) POST /api/nl/{pending_id}/confirm
+       Files involved: main.py (nl_confirm endpoint)
+       
+    b) Read proposal: data/jobs/nl_{pending_id}.json
+       
+    c) Execute DB action based on proposal.action:
+       - "create": db.add(Employee(...))
+       - "update": emp.field = value; db.commit()
+       - "delete": db.delete(emp); db.commit()
+       - "read": db.query(Employee).filter_by(id=...)
+       
+       Files involved: db/models.py, db/session.py
+       Database: UPDATE/INSERT/DELETE on employees table
+       
+    d) Return result to frontend
+    
+    e) Frontend displays success/error message
+
+┌──────────────────────────────────────────────────────────────────┐
+│ KEY FILES BY LAYER                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+Frontend Layer:
+  - frontend/src/Upload.jsx: File picker, chat input, job polling
+  - frontend/src/App.jsx: Message display, smooth scroll
+  - frontend/src/NLCrud.jsx: Natural language CRUD interface
+  - frontend/src/styles.css: Custom styling (+ button, Send button)
+
+Backend API Layer:
+  - backend/app/main.py: All API endpoints and orchestration
+  - backend/app/db/models.py: SQLAlchemy Employee model
+  - backend/app/db/session.py: Database connection setup
+
+Service Layer (Adapters):
+  - backend/app/services/storage.py: GridFS or filesystem storage
+  - backend/app/services/extractor.py: PDF text extraction + OCR
+  - backend/app/services/llm_adapter.py: Ollama HTTP/CLI wrapper
+  - backend/app/services/embeddings.py: sentence-transformers wrapper
+  - backend/app/services/vectorstore_faiss.py: FAISS index management
+
+Data/Artifacts:
+  - data/files/: Raw PDF storage (filesystem fallback)
+  - data/jobs/{job_id}.json: Background job status
+  - data/prompts/chat_{ts}.json: Chat prompt logs
+  - data/faiss/: FAISS vector index + metadata
+  - backend_dev.db: SQLite database (default)
+
+External Dependencies:
+  - PostgreSQL: Optional (via DATABASE_URL env var)
+  - MongoDB: Optional (via MONGO_URI env var for GridFS)
+  - Ollama: Required (local LLM server on port 11434)
+```
+
+
+
 Run (development)
 -----------------
 1. Backend (from `backend` folder):
