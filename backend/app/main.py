@@ -20,25 +20,72 @@ from app.db.session import SessionLocal, engine
 from app.db import models
 
 models.Base.metadata.create_all(bind=engine)
-# Ensure employees table has all required columns (simple demo migration)
+
+# Comprehensive migration for all Employee fields
 try:
     from sqlalchemy import inspect, text
 
     inspector = inspect(engine)
     cols = [c["name"] for c in inspector.get_columns("employees")]
 
-    # Add missing columns if they don't exist
+    # Define all new columns with their types
+    new_columns = {
+        "employee_id": "VARCHAR(6) UNIQUE",
+        "phone": "VARCHAR(64)",
+        "department": "VARCHAR(128)",
+        "position": "VARCHAR(128)",
+        "linkedin_url": "VARCHAR(512)",
+        "portfolio_url": "VARCHAR(512)",
+        "github_url": "VARCHAR(512)",
+        "career_objective": "TEXT",
+        "summary": "TEXT",
+        "work_experience": "TEXT",
+        "education": "TEXT",
+        "technical_skills": "TEXT",
+        "soft_skills": "TEXT",
+        "languages": "TEXT",
+        "certifications": "TEXT",
+        "achievements": "TEXT",
+        "hobbies": "TEXT",
+        "cocurricular_activities": "TEXT",
+        "address": "TEXT",
+        "city": "VARCHAR(128)",
+        "country": "VARCHAR(128)",
+        "extracted_text": "TEXT"
+    }
+
+    # Add missing columns
     with engine.connect() as conn:
-        if "phone" not in cols:
-            conn.execute(text("ALTER TABLE employees ADD COLUMN phone VARCHAR(64)"))
+        for col_name, col_type in new_columns.items():
+            if col_name not in cols:
+                try:
+                    conn.execute(text(f"ALTER TABLE employees ADD COLUMN {col_name} {col_type}"))
+                    conn.commit()
+                    logger.info(f"Added column: {col_name}")
+                except Exception as e:
+                    logger.warning(f"Could not add column {col_name}: {e}")
+
+        # Create sequence for employee_id if it doesn't exist (PostgreSQL)
+        try:
+            conn.execute(text("CREATE SEQUENCE IF NOT EXISTS employee_id_seq START 1"))
             conn.commit()
-        if "department" not in cols:
-            conn.execute(text("ALTER TABLE employees ADD COLUMN department VARCHAR(128)"))
+        except Exception:
+            pass  # SQLite doesn't support sequences
+
+        # Update existing records with employee_id if NULL
+        try:
+            result = conn.execute(text("SELECT id FROM employees WHERE employee_id IS NULL ORDER BY id"))
+            for row in result:
+                emp_id = row[0]
+                # Generate employee_id in format 013449 (6 digits, zero-padded)
+                employee_id = str(emp_id).zfill(6)
+                conn.execute(text(f"UPDATE employees SET employee_id = '{employee_id}' WHERE id = {emp_id}"))
             conn.commit()
-        if "position" not in cols:
-            conn.execute(text("ALTER TABLE employees ADD COLUMN position VARCHAR(128)"))
-            conn.commit()
-except Exception:
+        except Exception as e:
+            logger.warning(f"Could not update employee_id: {e}")
+
+except Exception as e:
+    logger.error(f"Migration error: {e}")
     # non-fatal; if alter fails it's likely the DB doesn't support it or column exists
     pass
 
@@ -139,12 +186,42 @@ async def process_cv(file_id: str, filename: str, job_id: str):
             mf.write(f"extracted_len={len(text)}")
     except Exception:
         pass
-    # simple demo: store employee into SQL DB with minimal fields
+    # Store employee into SQL DB with auto-generated employeeID
     from sqlalchemy.orm import Session
+    import json as _json
+
+    # Save extracted text to MongoDB in human-readable format
+    try:
+        extracted_doc = {
+            "filename": filename,
+            "extracted_text": text,
+            "extraction_date": str(uuid.uuid4()),  # Use as timestamp identifier
+            "text_length": len(text),
+            "file_id": file_id
+        }
+        # Store as JSON document in MongoDB (human-readable)
+        extracted_text_json = _json.dumps(extracted_doc, indent=2)
+        storage.save_file(extracted_text_json.encode('utf-8'), filename=f"{filename}_extracted.json")
+    except Exception as e:
+        logger.warning(f"Could not save extracted text to MongoDB: {e}")
 
     db: Session = SessionLocal()
     try:
-        emp = models.Employee(name=filename, raw_text=text)
+        # Generate employee_id in format 013449 (6 digits, zero-padded)
+        # Get next ID from sequence or count
+        try:
+            max_id = db.execute(text("SELECT COALESCE(MAX(id), 0) + 1 FROM employees")).scalar()
+        except:
+            max_id = 1
+
+        employee_id = str(max_id).zfill(6)  # Format: 013449
+
+        emp = models.Employee(
+            employee_id=employee_id,
+            name=filename,  # Will be updated by LLM extraction
+            raw_text=text,
+            extracted_text=text
+        )
         db.add(emp)
         db.commit()
         db.refresh(emp)
