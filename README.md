@@ -223,5 +223,56 @@ The LLM gets information from **multiple sources** depending on the query:
 ---
 
 
+### 3. Project Requirements Coverage Analysis
+
+Based on the `PROJECT_GUIDE.md`, here's the status of all **POC A** requirements:
+
+#### FULLY IMPLEMENTED (Done)
+
+| Feature | Status | Details |
+| --- | --- | --- |
+| **PDF Upload Endpoint** | Done | `POST /api/upload-cv` accepts PDF, returns `job_id` |
+| **PDF Storage** | Done | GridFS (MongoDB) + local filesystem fallback |
+| **PDF Text Extraction** | Done | `pdfplumber` with `pytesseract` OCR fallback |
+| **LLM Adapter** | Done | Ollama HTTP API + CLI fallback |
+| **LLM Structured Extraction** | Done | Pydantic validation for name, email, skills, etc. |
+| **SQLAlchemy Models** | Done | Employee model with PostgreSQL/SQLite |
+| **Background Processing** | Done | Threading for CV processing (`BackgroundTasks`) |
+| **Job Polling** | Done | `GET /api/job/{id}` with status files |
+| **Chat Endpoint** | Done | `POST /api/chat` with employee context |
+| **RAG/FAISS** | Done | Vector indexing and retrieval implemented |
+| **Embeddings** | Done | `sentence-transformers` for chunk embeddings |
+| **Frontend Upload+Chat** | Done | React components with merged flow |
+| **Session Memory** | Done | `session_id` for conversation continuity |
+| **NL CRUD** | Done | Natural language command parsing |
+| **Prompt Logging** | Done | Logs under `data/jobs/` and `data/prompts/` |
+| **Diagnostic Endpoints** | Done | `/api/storage-status`, `/api/db-status` |
+
+---
+
+#### PARTIALLY IMPLEMENTED
+
+| Feature | Status | Missing |
+| --- | --- | --- |
+| **OCR Fallback** | Partial | Works but requires Tesseract binary installed |
+| **NL CRUD UI** | Partial | Basic UI exists, needs polish |
+| **Tailwind Migration** | Partial | Core styles done, some legacy CSS remains |
+| **Multiple Resume Upload** | Done (Fixed) | Was blocking, now works |
+
+---
+
+### Summary
+
+| Category | Done | Partial | Pending |
+| --- | --- | --- | --- |
+| **Core Features** | 16 | 2 | 0 |
+| **Production Hardening** | 0 | 0 | 5 |
+| **Testing** | 0 | 0 | 2 |
+| **DevOps** | 0 | 0 | 1 |
+| **Total** | **16** | **2** | **8** |
+
+---
+
+
 
 *Last updated: February 1, 2026*

@@ -14,7 +14,8 @@ markdown/
 ├── 04-development/       # Development reports and debugging
 ├── 05-features/          # Feature documentation and UI/UX
 ├── 06-backend/           # Backend-specific documentation
-└── 07-frontend/          # Frontend-specific documentation
+├── 07-frontend/          # Frontend-specific documentation
+└── 08-interview/         # Interview questions and test cases
 ```
 
 ---
@@ -84,6 +85,16 @@ markdown/
 | File | Description |
 |------|-------------|
 | [README.md](07-frontend/README.md) | Frontend overview |
+
+---
+
+## 08-Interview
+
+| File | Description |
+|------|-------------|
+| [EMS_PROJECT_QUESTIONS.md](08-interview/EMS_PROJECT_QUESTIONS.md) | EMS 2.0 project-specific interview questions |
+| [TECHNOLOGY_QUESTIONS.md](08-interview/TECHNOLOGY_QUESTIONS.md) | LLM, Python, and technology interview questions |
+| [HALLUCINATION_TEST_CASES.md](08-interview/HALLUCINATION_TEST_CASES.md) | Edge cases for testing LLM hallucination |
 
 ---
 
