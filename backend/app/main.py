@@ -20,16 +20,24 @@ from app.db.session import SessionLocal, engine
 from app.db import models
 
 models.Base.metadata.create_all(bind=engine)
-# Ensure employees table has a `phone` column (simple demo migration)
+# Ensure employees table has all required columns (simple demo migration)
 try:
     from sqlalchemy import inspect, text
 
     inspector = inspect(engine)
     cols = [c["name"] for c in inspector.get_columns("employees")]
-    if "phone" not in cols:
-        # SQLite / Postgres compatible ALTER (SQLite allows ADD COLUMN)
-        with engine.connect() as conn:
+
+    # Add missing columns if they don't exist
+    with engine.connect() as conn:
+        if "phone" not in cols:
             conn.execute(text("ALTER TABLE employees ADD COLUMN phone VARCHAR(64)"))
+            conn.commit()
+        if "department" not in cols:
+            conn.execute(text("ALTER TABLE employees ADD COLUMN department VARCHAR(128)"))
+            conn.commit()
+        if "position" not in cols:
+            conn.execute(text("ALTER TABLE employees ADD COLUMN position VARCHAR(128)"))
+            conn.commit()
 except Exception:
     # non-fatal; if alter fails it's likely the DB doesn't support it or column exists
     pass
@@ -173,12 +181,14 @@ async def process_cv(file_id: str, filename: str, job_id: str):
                     pass
         except Exception:
             pass
-        # LLM-driven structured extraction: ask the model to return JSON with name/email/phone
+        # LLM-driven structured extraction: ask the model to return JSON with name/email/phone/department/position
         try:
             extraction_prompt = (
                 "You are a JSON extraction assistant. Given the following resume text,"
-                " extract the candidate's full name, primary email address, and phone number."
-                " Return ONLY valid JSON with keys: name, email, phone. If a value is not present, return null."
+                " extract the candidate's full name, primary email address, phone number, current/desired department, and current/desired position/job title."
+                " Return ONLY valid JSON with keys: name, email, phone, department, position. If a value is not present, return null."
+                " For department: extract team/department name (e.g., 'IT', 'HR', 'Engineering', 'Marketing')."
+                " For position: extract job title/role (e.g., 'Software Engineer', 'Manager', 'Analyst')."
                 " Resume text:\n\n" + (text[:4000] or "")
             )
             # write prompt log for this job
@@ -212,6 +222,8 @@ async def process_cv(file_id: str, filename: str, job_id: str):
                 name: str | None = None
                 email: str | None = None
                 phone: str | None = None
+                department: str | None = None
+                position: str | None = None
 
             parsed_model = None
             if isinstance(parsed, dict):
@@ -225,7 +237,8 @@ async def process_cv(file_id: str, filename: str, job_id: str):
                 try:
                     retry_prompt = (
                         "You are a JSON extraction assistant. Return STRICT JSON only with keys:"
-                        " name, email, phone. Use null for missing values. Do NOT include any explanation."
+                        " name, email, phone, department, position. Use null for missing values. Do NOT include any explanation."
+                        " Extract department (team/dept like 'IT', 'HR') and position (job title like 'Engineer', 'Manager')."
                         " Here is the resume text:\n\n" + (text[:6000] or "")
                     )
                     # write retry prompt log
@@ -257,6 +270,8 @@ async def process_cv(file_id: str, filename: str, job_id: str):
                 name_val = parsed_model.name
                 email_val = parsed_model.email
                 phone_val = parsed_model.phone
+                department_val = parsed_model.department
+                position_val = parsed_model.position
                 if name_val:
                     emp.name = name_val
                 if email_val:
@@ -264,6 +279,16 @@ async def process_cv(file_id: str, filename: str, job_id: str):
                 if phone_val:
                     try:
                         setattr(emp, "phone", phone_val)
+                    except Exception:
+                        pass
+                if department_val:
+                    try:
+                        setattr(emp, "department", department_val)
+                    except Exception:
+                        pass
+                if position_val:
+                    try:
+                        setattr(emp, "position", position_val)
                     except Exception:
                         pass
                 db.add(emp)
@@ -319,6 +344,135 @@ async def chat(request: Request, req: ChatRequest | None = None):
     logger.info(f"/api/chat invoked via {request.method}")
 
     prompt = req.prompt
+
+    # Detect if this is a CRUD command and route accordingly
+    crud_keywords = ["update", "delete", "remove", "create", "add", "change", "modify", "set"]
+    is_crud = any(keyword in prompt.lower() for keyword in crud_keywords)
+
+    # Check for employee-related context (e.g., "employee", "record", name patterns)
+    has_employee_context = any(word in prompt.lower() for word in ["employee", "record", "person", "user", "from", "to"])
+
+    if is_crud and has_employee_context:
+        # Route to NL-CRUD pipeline
+        try:
+            # Parse the command using the NL-CRUD parser
+            parse_prompt = (
+                "You are a JSON action parser. Convert the user's natural language command into a JSON object with keys:\n"
+                "action: one of [create, read, update, delete],\n"
+                "employee_id: integer or null,\n"
+                "employee_name: name of the employee (string) or null (if name is mentioned in command, extract it here),\n"
+                "fields: object of fields to set (for create/update). Allowed fields: name, email, phone, department, position.\n"
+                "Return ONLY valid JSON.\n"
+                "Examples:\n"
+                "- 'Update Arun from IT to HR department' -> {\"action\":\"update\", \"employee_id\":null, \"employee_name\":\"Arun\", \"fields\":{\"department\":\"HR\"}}\n"
+                "- 'Update employee 123 email to x@y.com' -> {\"action\":\"update\", \"employee_id\":123, \"employee_name\":null, \"fields\":{\"email\":\"x@y.com\"}}\n"
+                "- 'Create employee John in IT' -> {\"action\":\"create\", \"employee_id\":null, \"employee_name\":null, \"fields\":{\"name\":\"John\", \"department\":\"IT\"}}\n\n"
+                f"User command:\n{prompt}\n"
+            )
+
+            parse_resp = llm.generate(parse_prompt, timeout=20)
+
+            # Parse JSON
+            import json as _json, re
+            proposal = None
+            try:
+                proposal = _json.loads(parse_resp)
+            except Exception:
+                m = re.search(r"\{.*\}", parse_resp, re.S)
+                if m:
+                    try:
+                        proposal = _json.loads(m.group(0))
+                    except Exception:
+                        proposal = None
+
+            if not proposal:
+                # If parsing failed, fall back to normal chat
+                logger.warning("CRUD detection triggered but parsing failed, falling back to normal chat")
+            else:
+                # Validate and execute the CRUD operation
+                from sqlalchemy.orm import Session
+                db: Session = SessionLocal()
+
+                def resolve_employee(db, emp_id, emp_name):
+                    if emp_id:
+                        return db.query(models.Employee).filter(models.Employee.id == emp_id).first()
+                    elif emp_name:
+                        emp = db.query(models.Employee).filter(models.Employee.name.ilike(f"%{emp_name}%")).first()
+                        if not emp:
+                            emp = db.query(models.Employee).filter(models.Employee.name == emp_name).first()
+                        return emp
+                    return None
+
+                try:
+                    action = proposal.get("action")
+                    emp_id = proposal.get("employee_id")
+                    emp_name = proposal.get("employee_name")
+                    fields = proposal.get("fields") or {}
+
+                    if action == "update":
+                        emp = resolve_employee(db, emp_id, emp_name)
+                        if not emp:
+                            return {"reply": f"I couldn't find an employee named '{emp_name}' or with ID {emp_id}. Could you provide more details?"}
+
+                        # Build a confirmation message
+                        changes = []
+                        for k, v in fields.items():
+                            if hasattr(emp, k):
+                                old_val = getattr(emp, k)
+                                setattr(emp, k, v)
+                                changes.append(f"{k}: '{old_val}' → '{v}'")
+
+                        db.add(emp)
+                        db.commit()
+
+                        reply = f"Updated employee **{emp.name}** (ID: {emp.id}):\n" + "\n".join(f"- {c}" for c in changes)
+                        return {"reply": reply}
+
+                    elif action == "create":
+                        emp = models.Employee(
+                            name=fields.get("name") or "Unknown",
+                            email=fields.get("email"),
+                            phone=fields.get("phone"),
+                            department=fields.get("department"),
+                            position=fields.get("position"),
+                            raw_text=fields.get("raw_text")
+                        )
+                        db.add(emp)
+                        db.commit()
+                        db.refresh(emp)
+                        return {"reply": f"Created new employee **{emp.name}** (ID: {emp.id}) in {emp.department or 'no department'}."}
+
+                    elif action == "delete":
+                        emp = resolve_employee(db, emp_id, emp_name)
+                        if not emp:
+                            return {"reply": f"I couldn't find an employee to delete with name '{emp_name}' or ID {emp_id}."}
+                        emp_name_copy = emp.name
+                        emp_id_copy = emp.id
+                        db.delete(emp)
+                        db.commit()
+                        return {"reply": f"Deleted employee **{emp_name_copy}** (ID: {emp_id_copy})."}
+
+                    elif action == "read":
+                        emp = resolve_employee(db, emp_id, emp_name)
+                        if not emp:
+                            return {"reply": f"I couldn't find an employee with name '{emp_name}' or ID {emp_id}."}
+                        info = [
+                            f"**Name:** {emp.name}",
+                            f"**ID:** {emp.id}",
+                            f"**Email:** {emp.email or 'N/A'}",
+                            f"**Phone:** {getattr(emp, 'phone', 'N/A') or 'N/A'}",
+                            f"**Department:** {getattr(emp, 'department', 'N/A') or 'N/A'}",
+                            f"**Position:** {getattr(emp, 'position', 'N/A') or 'N/A'}"
+                        ]
+                        return {"reply": "\n".join(info)}
+
+                finally:
+                    db.close()
+
+        except Exception as e:
+            logger.exception("CRUD operation failed in chat endpoint")
+            # Fall back to normal chat on error
+            pass
     if req.employee_id:
         # minimal enrichment: fetch employee and include first 1000 chars
         from sqlalchemy.orm import Session
@@ -520,8 +674,13 @@ def nl_command(body: dict):
         "You are a JSON action parser. Convert the user's natural language command into a JSON object with keys:\n"
         "action: one of [create, read, update, delete],\n"
         "employee_id: integer or null,\n"
-        "fields: object of fields to set (for create/update),\n"
-        "Return ONLY valid JSON. Example: {\"action\":\"update\", \"employee_id\":123, \"fields\":{\"email\":\"x@y.com\"}}\n\n"
+        "employee_name: name of the employee (string) or null (if name is mentioned in command, extract it here),\n"
+        "fields: object of fields to set (for create/update). Allowed fields: name, email, phone, department, position.\n"
+        "Return ONLY valid JSON.\n"
+        "Examples:\n"
+        "- 'Update Arun from IT to HR department' -> {\"action\":\"update\", \"employee_id\":null, \"employee_name\":\"Arun\", \"fields\":{\"department\":\"HR\"}}\n"
+        "- 'Update employee 123 email to x@y.com' -> {\"action\":\"update\", \"employee_id\":123, \"employee_name\":null, \"fields\":{\"email\":\"x@y.com\"}}\n"
+        "- 'Create employee John in IT' -> {\"action\":\"create\", \"employee_id\":null, \"employee_name\":null, \"fields\":{\"name\":\"John\", \"department\":\"IT\"}}\n\n"
         f"User command:\n{cmd}\n"
     )
 
@@ -544,15 +703,87 @@ def nl_command(body: dict):
             except Exception:
                 proposal = None
 
+    # Validate the proposal for safety (hallucination protection)
+    validation_errors = []
+    warnings = []
+
+    if proposal and isinstance(proposal, dict):
+        # Validate action
+        action = proposal.get("action")
+        if action not in ["create", "read", "update", "delete"]:
+            validation_errors.append(f"Invalid action: {action}. Must be one of: create, read, update, delete")
+
+        # Validate fields
+        fields = proposal.get("fields") or {}
+        ALLOWED_FIELDS = {"name", "email", "phone", "department", "position", "raw_text"}
+        invalid_fields = set(fields.keys()) - ALLOWED_FIELDS
+        if invalid_fields:
+            validation_errors.append(f"Invalid fields detected: {', '.join(invalid_fields)}. Allowed fields: {', '.join(ALLOWED_FIELDS)}")
+
+        # Validate email format if present
+        if "email" in fields and fields["email"]:
+            import re
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            if not re.match(email_pattern, str(fields["email"])):
+                warnings.append(f"Email format looks invalid: {fields['email']}")
+
+        # Validate phone format if present (basic check)
+        if "phone" in fields and fields["phone"]:
+            # Remove common separators and check if it's mostly digits
+            phone_clean = str(fields["phone"]).replace("-", "").replace(" ", "").replace("(", "").replace(")", "").replace("+", "")
+            if not phone_clean.isdigit() or len(phone_clean) < 10:
+                warnings.append(f"Phone format looks invalid: {fields['phone']}")
+
+        # Validate employee exists (for update/delete/read)
+        if action in ["update", "delete", "read"]:
+            emp_id = proposal.get("employee_id")
+            emp_name = proposal.get("employee_name")
+
+            if not emp_id and not emp_name:
+                validation_errors.append(f"For {action} action, either employee_id or employee_name must be provided")
+            else:
+                # Check if employee exists in database
+                from sqlalchemy.orm import Session
+                db: Session = SessionLocal()
+                try:
+                    emp = None
+                    if emp_id:
+                        emp = db.query(models.Employee).filter(models.Employee.id == emp_id).first()
+                        if not emp:
+                            validation_errors.append(f"Employee with ID {emp_id} not found in database")
+                    elif emp_name:
+                        emp = db.query(models.Employee).filter(models.Employee.name.ilike(f"%{emp_name}%")).first()
+                        if not emp:
+                            validation_errors.append(f"Employee with name '{emp_name}' not found in database")
+                        else:
+                            # Add info about which employee was found
+                            warnings.append(f"Found employee: {emp.name} (ID: {emp.id})")
+                finally:
+                    db.close()
+
     pending_id = str(uuid.uuid4())
-    pending = {"command": cmd, "proposal": proposal, "raw_response": parse_resp}
+    pending = {
+        "command": cmd,
+        "proposal": proposal,
+        "raw_response": parse_resp,
+        "validation_errors": validation_errors,
+        "warnings": warnings,
+        "validated": len(validation_errors) == 0
+    }
     try:
         with open(os.path.join(JOB_DIR, f"nl_{pending_id}.json"), "w", encoding="utf-8") as pf:
             pf.write(_json.dumps(pending))
     except Exception:
         pass
 
-    return {"pending_id": pending_id, "proposal": proposal, "raw": parse_resp}
+    return {
+        "pending_id": pending_id,
+        "proposal": proposal,
+        "raw": parse_resp,
+        "validation_errors": validation_errors,
+        "warnings": warnings,
+        "validated": len(validation_errors) == 0
+    }
 
 
 @app.get("/api/nl/{pending_id}")
@@ -584,48 +815,83 @@ def nl_confirm(pending_id: str, confirm: dict | None = None):
     if not proposal or not isinstance(proposal, dict):
         raise HTTPException(status_code=400, detail="No valid proposal to apply")
 
+    # Check if proposal was validated and has no errors
+    if not pending.get("validated", False):
+        validation_errors = pending.get("validation_errors", [])
+        if validation_errors:
+            raise HTTPException(status_code=400, detail=f"Cannot apply proposal with validation errors: {'; '.join(validation_errors)}")
+
     action = proposal.get("action")
     emp_id = proposal.get("employee_id")
+    emp_name = proposal.get("employee_name")
     fields = proposal.get("fields") or {}
 
     from sqlalchemy.orm import Session
 
     db: Session = SessionLocal()
+
+    # Helper function to resolve employee by ID or name
+    def resolve_employee(db, emp_id, emp_name):
+        if emp_id:
+            return db.query(models.Employee).filter(models.Employee.id == emp_id).first()
+        elif emp_name:
+            # Case-insensitive partial name match
+            emp = db.query(models.Employee).filter(models.Employee.name.ilike(f"%{emp_name}%")).first()
+            if not emp:
+                # Try exact match
+                emp = db.query(models.Employee).filter(models.Employee.name == emp_name).first()
+            return emp
+        return None
+
     try:
         if action == "create":
-            emp = models.Employee(name=fields.get("name") or "", email=fields.get("email"), raw_text=fields.get("raw_text"))
+            emp = models.Employee(
+                name=fields.get("name") or "",
+                email=fields.get("email"),
+                phone=fields.get("phone"),
+                department=fields.get("department"),
+                position=fields.get("position"),
+                raw_text=fields.get("raw_text")
+            )
             db.add(emp)
             db.commit()
             db.refresh(emp)
-            res = {"status": "created", "employee_id": emp.id}
+            res = {"status": "created", "employee_id": emp.id, "employee": {"id": emp.id, "name": emp.name, "email": emp.email, "department": emp.department, "position": emp.position}}
         elif action == "update":
-            if not emp_id:
-                raise HTTPException(status_code=400, detail="employee_id required for update")
-            emp = db.query(models.Employee).filter(models.Employee.id == emp_id).first()
+            emp = resolve_employee(db, emp_id, emp_name)
             if not emp:
-                raise HTTPException(status_code=404, detail="employee not found")
+                if emp_name:
+                    raise HTTPException(status_code=404, detail=f"Employee with name '{emp_name}' not found")
+                else:
+                    raise HTTPException(status_code=404, detail=f"Employee with id {emp_id} not found")
+            # Store old values for confirmation
+            old_vals = {}
             for k, v in fields.items():
                 if hasattr(emp, k):
+                    old_vals[k] = getattr(emp, k)
                     setattr(emp, k, v)
             db.add(emp)
             db.commit()
-            res = {"status": "updated", "employee_id": emp.id}
+            res = {"status": "updated", "employee_id": emp.id, "employee": {"id": emp.id, "name": emp.name, "email": emp.email, "department": emp.department, "position": emp.position}, "old_values": old_vals}
         elif action == "delete":
-            if not emp_id:
-                raise HTTPException(status_code=400, detail="employee_id required for delete")
-            emp = db.query(models.Employee).filter(models.Employee.id == emp_id).first()
+            emp = resolve_employee(db, emp_id, emp_name)
             if not emp:
-                raise HTTPException(status_code=404, detail="employee not found")
+                if emp_name:
+                    raise HTTPException(status_code=404, detail=f"Employee with name '{emp_name}' not found")
+                else:
+                    raise HTTPException(status_code=404, detail=f"Employee with id {emp_id} not found")
+            emp_data = {"id": emp.id, "name": emp.name, "email": emp.email, "department": emp.department, "position": emp.position}
             db.delete(emp)
             db.commit()
-            res = {"status": "deleted", "employee_id": emp_id}
+            res = {"status": "deleted", "employee_id": emp.id, "deleted_employee": emp_data}
         elif action == "read":
-            if not emp_id:
-                raise HTTPException(status_code=400, detail="employee_id required for read")
-            emp = db.query(models.Employee).filter(models.Employee.id == emp_id).first()
+            emp = resolve_employee(db, emp_id, emp_name)
             if not emp:
-                raise HTTPException(status_code=404, detail="employee not found")
-            res = {"status": "ok", "employee": {"id": emp.id, "name": emp.name, "email": emp.email, "raw_len": len(emp.raw_text or "")}}
+                if emp_name:
+                    raise HTTPException(status_code=404, detail=f"Employee with name '{emp_name}' not found")
+                else:
+                    raise HTTPException(status_code=404, detail=f"Employee with id {emp_id} not found")
+            res = {"status": "ok", "employee": {"id": emp.id, "name": emp.name, "email": emp.email, "phone": getattr(emp, "phone", None), "department": getattr(emp, "department", None), "position": getattr(emp, "position", None), "raw_len": len(emp.raw_text or "")}}
         else:
             raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
     finally:

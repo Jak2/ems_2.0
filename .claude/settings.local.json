@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "Bash(if [ -f check_db_connection.py ])",
+      "Bash(then mv check_db_connection.py scripts/)",
+      "Bash(fi)",
+      "Bash(if [ -f diagnose_databases.py ])",
+      "Bash(then mv diagnose_databases.py scripts/)"
+    ]
+  }
+}

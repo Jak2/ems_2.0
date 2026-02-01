@@ -1,0 +1,101 @@
+Pydantic rules and models used / recommended for EMS_2.0
+
+This file summarizes the pydantic validation rules currently used in the project (based on repo structure) and recommended, plus example model code you can copy into your project.
+
+1) Principles / rules used
+- Use strong types for fields: EmailStr, HttpUrl, constr, conint, float, bool.
+- Use lists for repeating groups (skills, education, experience).
+- Use nested models for complex fields (ExperienceEntry, EducationEntry, Certification).
+- Use optional fields liberally: many resume fields will be missing.
+- Validate and normalize: use validators to normalize phone numbers, dates, and to coerce strings -> lists.
+- Use root_validator to enforce cross-field rules (e.g., start_date <= end_date).
+- Use parse_obj / .model_validate (pydantic v2) or .parse_obj (v1) when accepting LLM/JSON output.
+- Reject unexpected extra fields by default (model Config: extra = Extra.forbid) for strictness, or extra = Extra.ignore if you want forward-compatibility.
+- Provide helpful errors to the frontend to request clarifications from users when needed.
+
+2) Recommended Employee model (example)
+
+from pydantic import BaseModel, EmailStr, HttpUrl, constr, validator
+from typing import List, Optional
+from datetime import date
+
+class ExperienceEntry(BaseModel):
+    title: Optional[str]
+    company: Optional[str]
+    start_date: Optional[str]  # normalized ISO string recommended
+    end_date: Optional[str]    # or None for present
+    description: Optional[str]
+    responsibilities: Optional[List[str]] = []
+
+    @validator('start_date', 'end_date', pre=True)
+    def normalize_date(cls, v):
+        if not v:
+            return None
+        # implement date parsing / normalization here (dateutil, arrow, or custom)
+        return str(v)
+
+class EducationEntry(BaseModel):
+    school: Optional[str]
+    degree: Optional[str]
+    field: Optional[str]
+    start_date: Optional[str]
+    end_date: Optional[str]
+
+class Certification(BaseModel):
+    name: str
+    issuer: Optional[str]
+    date: Optional[str]
+
+class Employee(BaseModel):
+    id: Optional[int]  # assigned by SQL DB
+    name: Optional[str]
+    email: Optional[EmailStr]
+    phone: Optional[constr(regex=r"^\+?[0-9\-() ]{7,}$")]  # basic normalization
+    linkedin: Optional[HttpUrl]
+    summary: Optional[str]
+    skills: List[str] = []
+    languages: List[str] = []
+    education: List[EducationEntry] = []
+    experience: List[ExperienceEntry] = []
+    certifications: List[Certification] = []
+    raw_text: Optional[str]
+
+    class Config:
+        extra = 'forbid'  # be strict with LLM outputs, then handle errors gracefully
+
+    @validator('skills', pre=True)
+    def split_skills(cls, v):
+        if isinstance(v, str):
+            # naive split, refine with splitting on commas/newlines
+            return [s.strip() for s in v.split(',') if s.strip()]
+        return v
+
+3) How to validate LLM JSON output safely
+- Have the LLM return a JSON object exactly matching the Employee schema.
+- Immediately run Employee.parse_obj(llm_output) (or model_validate for pydantic v2).
+- Catch ValidationError and capture missing/invalid fields. Return a clear "clarify" prompt to the LLM or the user:
+  - e.g., "I couldn't parse the 'start_date' for experience[0], please provide ISO dates or 'Present'."
+- Use a small set of "repair" routines (normalize phone, strip html, fix encoding) before validating.
+
+4) Extra validation / normalization helpers (recommendations)
+- Use python-dateutil or arrow to parse many date formats.
+- Use phonenumbers library to parse/format phone numbers if international support is required.
+- Lowercase+strip emails, normalize unicode.
+- Deduplicate skills (case-insensitive).
+
+5) Edge cases to handle
+- Multiple emails/phones: pick primary (first) and store others in a list if needed.
+- Bulleted/HTML formatted text in LLM output: strip tags and join lines.
+- Ambiguous dates ("Summer 2017"): store raw and mark as ambiguous; attempt best-effort normalization.
+- Overlong text: truncate summary fields to a reasonable length for the DB column.
+
+6) Storing to Postgres
+- Use pydantic model.dict(exclude_none=True) to build the SQLAlchemy insert payload.
+- For nested lists, either:
+  - Serialize as JSON column (recommended for flexible schema: JSONB), or
+  - Normalize fully to relational tables (experience, education) with foreign keys.
+
+7) Example minimal JSON schema prompt (for the LLM)
+- "Return a single, valid JSON object with the following keys exactly: name, email, phone, linkedin, summary, skills (list of strings), languages (list), education (list of {school, degree, field, start_date, end_date}), experience (list of {title, company, start_date, end_date, description}), certifications (list of {name, issuer, date}), raw_text. Dates should be ISO format YYYY-MM-DD or the string 'Present'. Do NOT return any text outside the JSON object."
+
+-- End of file --
