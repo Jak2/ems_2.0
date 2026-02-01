@@ -325,6 +325,209 @@ async function findBackendBase() {
 
 ---
 
+### Error #10: Variable Shadowing Breaks SQLAlchemy Query
+
+**Symptom**:
+```
+'str' object is not callable
+```
+Employee ID generation failed, causing fallback to '000001' which already existed.
+
+**Root Cause**: The variable `text` (holding extracted PDF content) was shadowing SQLAlchemy's `text` function imported at module level. When the code called `text("SELECT...")`, Python tried to call the PDF string as a function.
+
+```python
+# Problem: text variable shadows SQLAlchemy's text function
+from sqlalchemy import text  # Imported at line 30
+
+# Later in process_cv():
+text = extract_text_from_bytes(data)  # Line 237 - shadows the import!
+
+# This fails because 'text' is now a string, not a function
+db.execute(text("SELECT MAX(id)..."))  # 'str' object is not callable
+```
+
+**Solution**: Renamed the variable from `text` to `pdf_text` throughout the `process_cv` function.
+
+```python
+# After: Use different variable name
+pdf_text = extract_text_from_bytes(data)
+
+# Import with alias when needed
+from sqlalchemy import text as sql_text
+db.execute(sql_text("SELECT..."))
+```
+
+**Lesson**: Always be careful about variable naming in Python - local variables can shadow imported functions.
+
+---
+
+### Error #11: Duplicate Employee ID Constraint Violation
+
+**Symptom**:
+```
+duplicate key value violates unique constraint "employees_employee_id_key"
+DETAIL: Key (employee_id)=(000001) already exists.
+```
+
+**Root Cause**: The employee_id generation query was using `MAX(id)` (auto-increment primary key) instead of `MAX(employee_id)`. Combined with the shadowing bug above, it always fell back to `1`, generating `000001` which already existed.
+
+```python
+# Before: Wrong column used
+max_id = db.execute(text("SELECT COALESCE(MAX(id), 0) + 1 FROM employees")).scalar()
+# This queries the auto-increment id, not employee_id
+```
+
+**Solution**: Query the actual `employee_id` column, casting to integer for proper MAX comparison. Added multiple fallbacks.
+
+```python
+# After: Query correct column with fallbacks
+from sqlalchemy import text as sql_text
+try:
+    result = db.execute(sql_text(
+        "SELECT COALESCE(MAX(CAST(employee_id AS INTEGER)), 0) + 1 FROM employees WHERE employee_id IS NOT NULL"
+    )).scalar()
+    next_id = result if result else 1
+except Exception as e:
+    # Fallback 1: count-based
+    try:
+        count = db.query(models.Employee).count()
+        next_id = count + 1
+    except Exception:
+        # Fallback 2: timestamp-based (guaranteed unique)
+        import time
+        next_id = int(time.time()) % 1000000
+
+employee_id = str(next_id).zfill(6)  # Format: 000002
+```
+
+---
+
+### Error #12: Pydantic Validation Fails on LLM Dict Arrays
+
+**Symptom**:
+```
+3 validation errors for ComprehensiveExtractionModel
+education.0
+  Input should be a valid string [type=string_type, input_value={'degree': 'B.E, CSE', ...}, input_type=dict]
+```
+
+**Root Cause**: The LLM returned structured data for fields like `education` as arrays of dictionaries instead of arrays of strings:
+
+```json
+// What LLM returned:
+{"education": [{"degree": "B.E", "university": "MIT", "year": "2021"}]}
+
+// What Pydantic expected:
+{"education": ["B.E from MIT, 2021"]}
+```
+
+**Solution**: Made the Pydantic model accept `List[Any]` and added a field validator to convert dicts to JSON strings.
+
+```python
+from pydantic import BaseModel, field_validator
+from typing import List, Any
+import json
+
+class ComprehensiveExtractionModel(BaseModel):
+    education: List[Any] | None = None  # Accept any type
+    work_experience: List[Any] | None = None
+    # ... other fields
+
+    @field_validator('education', 'work_experience', ..., mode='before')
+    @classmethod
+    def convert_dicts_to_strings(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, list):
+            result = []
+            for item in v:
+                if isinstance(item, dict):
+                    # Convert dict to JSON string for storage
+                    result.append(json.dumps(item, ensure_ascii=False))
+                else:
+                    result.append(str(item) if item is not None else None)
+            return result
+        return v
+```
+
+---
+
+### Error #13: Cannot Upload Multiple Resumes
+
+**Symptom**: After uploading one resume and doing some queries, trying to upload a second resume did nothing.
+
+**Root Cause**: The frontend `handleChat` function had a condition that prevented file uploads once an `employeeId` was set:
+
+```javascript
+// Before: Blocked subsequent uploads
+const hasFile = file && !employeeId && !isProcessing
+// Once employeeId is set, !employeeId is false, so hasFile is always false
+```
+
+**Solution**: Removed the `!employeeId` check to allow uploading new files anytime.
+
+```javascript
+// After: Allow file upload even with existing employeeId
+const hasFile = file && !isProcessing
+// Now users can switch between candidates by uploading new resumes
+```
+
+---
+
+### Error #14: BackgroundTasks Not Running (FastAPI)
+
+**Symptom**: Upload returned immediately but background processing never started. Job status stayed "pending" forever.
+
+**Root Cause**: Two issues:
+1. `process_cv` was defined as `async def` but contained blocking calls (`subprocess.run`, `requests.post`)
+2. FastAPI's `BackgroundTasks` sometimes has issues with blocking operations
+
+```python
+# Problem: async function with blocking calls
+async def process_cv(...):
+    # These block the event loop!
+    proc = subprocess.run(...)  # BLOCKING
+    resp = requests.post(...)   # BLOCKING
+```
+
+**Solution**: Changed to regular function and used `threading.Thread` directly.
+
+```python
+# After: Regular function with explicit threading
+def process_cv(...):  # Not async
+    # Blocking calls are fine in a thread
+    proc = subprocess.run(...)
+    resp = requests.post(...)
+
+# In upload_cv:
+import threading
+thread = threading.Thread(target=lambda: process_cv(file_id, filename, job_id), daemon=True)
+thread.start()
+```
+
+---
+
+### Error #15: Job Status File Never Created
+
+**Symptom**: `/api/job/{id}` always returned `{"status": "pending"}` even though processing was supposedly running.
+
+**Root Cause**: The job status file was only written at the end of processing. If the process crashed early (e.g., due to the shadowing bug), no status file existed.
+
+**Solution**: Write "processing" status immediately at the start of `process_cv`, before any other work.
+
+```python
+def process_cv(file_id: str, filename: str, job_id: str):
+    # FIRST THING: Write initial status
+    os.makedirs(JOB_DIR, exist_ok=True)
+    job_path = os.path.join(JOB_DIR, f"{job_id}.json")
+    with open(job_path, "w", encoding="utf-8") as jf:
+        jf.write('{"status":"processing","filename":"' + filename + '"}')
+
+    # Now do the actual work...
+```
+
+---
+
 ## 4. Feature Implementation Journey
 
 ### Feature 1: CV Upload & Processing
@@ -459,6 +662,70 @@ System works even if some components fail:
 
 ---
 
+### Trick 6: Pydantic Field Validators for LLM Output
+
+LLMs return inconsistent data structures. Use Pydantic field validators to normalize:
+
+```python
+from pydantic import BaseModel, field_validator
+from typing import List, Any
+
+class ExtractionModel(BaseModel):
+    education: List[Any] | None = None  # Accept anything
+
+    @field_validator('education', mode='before')
+    @classmethod
+    def normalize_to_strings(cls, v):
+        if isinstance(v, list):
+            return [json.dumps(x) if isinstance(x, dict) else str(x) for x in v]
+        return v
+```
+
+This handles:
+- `["BS from MIT"]` - passes through
+- `[{"degree": "BS", "school": "MIT"}]` - converts to `['{"degree": "BS", "school": "MIT"}']`
+
+---
+
+### Trick 7: Import Aliasing to Avoid Shadowing
+
+When you need to use a function name that might conflict with variables:
+
+```python
+# At module level
+from sqlalchemy import text  # Could be shadowed
+
+# Inside functions where 'text' might be used as a variable
+from sqlalchemy import text as sql_text  # Safe import with alias
+result = db.execute(sql_text("SELECT ..."))
+```
+
+---
+
+### Trick 8: Threading for Background Tasks in FastAPI
+
+FastAPI's `BackgroundTasks` works best with async I/O. For blocking operations, use explicit threading:
+
+```python
+import threading
+
+@app.post("/api/upload")
+async def upload(file: UploadFile):
+    job_id = str(uuid.uuid4())
+
+    def run_blocking_task():
+        # Blocking I/O is fine in a separate thread
+        subprocess.run(...)
+        requests.post(...)
+
+    thread = threading.Thread(target=run_blocking_task, daemon=True)
+    thread.start()
+
+    return {"job_id": job_id}  # Returns immediately
+```
+
+---
+
 ## 6. Limitations & Known Issues
 
 ### Performance Limitations
@@ -478,11 +745,17 @@ System works even if some components fail:
 | No authentication | MVP scope | Add JWT/OAuth |
 | English only extraction | LLM training | Use multilingual model |
 
-### Known Bugs
+### Known Bugs (Resolved)
 
-1. **Duplicate employee IDs possible**: Race condition if two uploads happen simultaneously
-2. **Large PDFs may timeout**: No chunking for very large documents
-3. **Some resume formats fail**: Complex multi-column layouts confuse pdfplumber
+1. ~~**Duplicate employee IDs possible**~~: Fixed by querying `MAX(employee_id)` instead of `MAX(id)` with proper fallbacks
+2. ~~**Variable shadowing crash**~~: Fixed by renaming `text` variable to `pdf_text`
+3. ~~**Cannot upload multiple resumes**~~: Fixed by removing `!employeeId` condition
+
+### Remaining Known Issues
+
+1. **Large PDFs may timeout**: No chunking for very large documents
+2. **Some resume formats fail**: Complex multi-column layouts confuse pdfplumber
+3. **Race condition on concurrent uploads**: Two simultaneous uploads could still potentially generate the same employee_id (edge case)
 
 ---
 
@@ -499,6 +772,16 @@ System works even if some components fail:
 4. **Comprehensive logging saves debugging time** - When LLM extraction fails, logs show exactly where.
 
 5. **Make everything configurable** - Environment variables prevent "works on my machine" problems.
+
+6. **Watch for variable shadowing** - Python allows local variables to shadow module imports. A variable named `text` can shadow `sqlalchemy.text()`, causing cryptic "'str' object is not callable" errors.
+
+7. **Avoid async functions with blocking I/O** - `async def` functions that call `subprocess.run()` or `requests.post()` will block the entire event loop. Use regular functions with threading instead.
+
+8. **Write status early in background tasks** - If a background job crashes before writing any status, there's no way to know what happened. Write "processing" status immediately on task start.
+
+9. **Make Pydantic models flexible for LLM output** - LLMs are unpredictable. Use `List[Any]` with validators instead of strict `List[str]` when accepting LLM-generated data.
+
+10. **Frontend state conditions can block features** - A condition like `!employeeId` might make sense initially but can prevent legitimate use cases (uploading multiple resumes).
 
 ### Process Lessons
 
@@ -567,4 +850,13 @@ DATABASE_URL=postgresql://user:pass@localhost/ems
 ---
 
 *Report generated for EMS 2.0 project documentation.*
-*Last updated: February 2026*
+*Last updated: February 1, 2026*
+
+---
+
+## Changelog
+
+| Date | Changes |
+|------|---------|
+| Feb 1, 2026 | Added Errors #10-15: Variable shadowing, duplicate ID, Pydantic validation, multiple upload, BackgroundTasks, job status. Added Tricks #6-8. Updated Known Bugs. |
+| Initial | Errors #1-9, Features #1-5, Tricks #1-5 documented |

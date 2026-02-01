@@ -6,7 +6,8 @@
       "Bash(then mv check_db_connection.py scripts/)",
       "Bash(fi)",
       "Bash(if [ -f diagnose_databases.py ])",
-      "Bash(then mv diagnose_databases.py scripts/)"
+      "Bash(then mv diagnose_databases.py scripts/)",
+      "Bash(dir /b \"d:\\\\delete me later\\\\ems_2.0\\\\*.md\")"
     ]
   }
 }
