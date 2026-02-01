@@ -19,24 +19,27 @@ class OllamaAdapter:
         # quick check for ollama CLI availability; not fatal because HTTP API may be available
         self._ollama_path = shutil.which("ollama")
 
-    def generate(self, prompt: str, timeout: int = 60) -> str:
+    def generate(self, prompt: str) -> str:
         """Generate text using Ollama.
 
         First try the local Ollama HTTP API at localhost:11434 (if the Ollama app is running).
         If that fails, fall back to the `ollama` CLI. Provide clearer errors for troubleshooting.
+
+        NOTE: No timeout is set - LLM generation can take a long time depending on hardware.
         """
         # 1) Try HTTP API only if OLLAMA_API_URL is explicitly set
         http_error = None
         api_url = os.getenv("OLLAMA_API_URL")
         if api_url:
             try:
-                payload = {"model": self.model, "prompt": prompt}
-                resp = requests.post(api_url, json=payload, timeout=timeout)
+                payload = {"model": self.model, "prompt": prompt, "stream": False}
+                resp = requests.post(api_url, json=payload, timeout=600)  # 10 min max for HTTP
                 if resp.status_code == 200:
                     data = resp.json()
-                    # common response keys: 'text' or 'output' or 'result'
-                    for k in ("text", "output", "result"):
-                        if k in data:
+                    # Ollama API returns response in 'response' key
+                    # Also check other common keys for compatibility
+                    for k in ("response", "text", "output", "result"):
+                        if k in data and data[k]:
                             return data[k].strip()
                     if isinstance(data, dict) and "data" in data:
                         return str(data["data"]).strip()
@@ -63,7 +66,8 @@ class OllamaAdapter:
         cmd = [self._ollama_path, "run", self.model, prompt]
         try:
             # Capture raw bytes (text=False) and decode explicitly with utf-8
-            proc = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout)
+            # No timeout - let the LLM take as long as needed
+            proc = subprocess.run(cmd, capture_output=True, text=False)
         except FileNotFoundError:
             raise RuntimeError("'ollama' CLI not found on PATH. Make sure Ollama is installed and available.")
 
@@ -76,7 +80,7 @@ class OllamaAdapter:
                     # Use subprocess.list2cmdline to build a Windows-friendly command line
                     cmd_list = [self._ollama_path, "run", self.model, prompt]
                     cmd_str = subprocess.list2cmdline(cmd_list)
-                    proc2 = subprocess.run(cmd_str, capture_output=True, text=False, timeout=timeout, shell=True)
+                    proc2 = subprocess.run(cmd_str, capture_output=True, text=False, shell=True)
                     # decode safely
                     out2 = b""
                     if proc2.stdout:

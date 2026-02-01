@@ -1,4 +1,4 @@
-import React, { useState } from "react"
+import React, { useState, useRef } from "react"
 
 // Upload component: handles PDF selection and upload, polls job status,
 // and sends chat prompts (including employee_id when available).
@@ -8,6 +8,8 @@ export default function Upload({ onNewMessage }) {
   const [status, setStatus] = useState("")
   const [employeeId, setEmployeeId] = useState(null)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [sessionId, setSessionId] = useState(null)  // For conversation memory
+  const abortControllerRef = useRef(null)  // For canceling requests
   // file selection is done via the input below; we no longer expose a separate
   // "Upload" button. The selected file will be uploaded automatically when the
   // user presses Send. This simplifies the UX as requested.
@@ -33,12 +35,19 @@ export default function Upload({ onNewMessage }) {
 
   // Upload the selected file and wait for processing to finish.
   // Returns employee_id or null on failure/timeout.
-  async function uploadAndWait() {
-    if (!file) return null
+  // Accepts optional fileToUpload parameter for when file state is cleared before upload
+  async function uploadAndWait(fileToUpload = null) {
+    const uploadFile = fileToUpload || file
+    if (!uploadFile) return null
     setIsProcessing(true)
+
+    // Create abort controller for this request
+    abortControllerRef.current = new AbortController()
+    const signal = abortControllerRef.current.signal
+
     try {
       const fd = new FormData()
-      fd.append("file", file)
+      fd.append("file", uploadFile)
       setStatus("Uploading (auto)...")
       // Discover a working backend host before uploading
       const base = await findBackendBase()
@@ -48,14 +57,21 @@ export default function Upload({ onNewMessage }) {
         setIsProcessing(false)
         return null
       }
-      const res = await fetch(`${base}/api/upload-cv`, { method: "POST", body: fd })
+      const res = await fetch(`${base}/api/upload-cv`, { method: "POST", body: fd, signal })
       const json = await res.json()
-      onNewMessage({ type: "info", text: `Uploaded ${file.name} — job ${json.job_id}` })
+      onNewMessage({ type: "info", text: `Uploaded ${uploadFile.name} — job ${json.job_id}` })
       const jid = json.job_id
-      const start = Date.now()
-      while (Date.now() - start < 60_000) {
+      setStatus("Processing CV with LLM (this may take a while)...")
+
+      // Poll indefinitely until job completes - no timeout limit
+      let pollCount = 0
+      while (true) {
+        // Check if aborted
+        if (signal.aborted) {
+          return null
+        }
         try {
-          const s = await fetch(`${base}/api/job/${jid}`)
+          const s = await fetch(`${base}/api/job/${jid}`, { signal })
           if (s.ok) {
             const j = await s.json()
             if (j.status === "done" && j.employee_id) {
@@ -75,13 +91,18 @@ export default function Upload({ onNewMessage }) {
         } catch (err) {
           // ignore transient errors while polling
         }
+        pollCount++
+        // Update status every 10 polls (~10 seconds) to show progress
+        if (pollCount % 10 === 0) {
+          setStatus(`Processing CV with LLM... (${pollCount}s elapsed)`)
+        }
         await new Promise((r) => setTimeout(r, 1000))
       }
-      onNewMessage({ type: "error", text: "Processing timed out (no result within 60s)" })
-      setStatus("Timed out")
-      setIsProcessing(false)
-      return null
     } catch (err) {
+      // Check if it was aborted by user
+      if (err.name === 'AbortError') {
+        return null  // Already handled by handleStop
+      }
       // Provide a clearer hint when the fetch fails (network/backend unreachable)
       onNewMessage({ type: "error", text: `Upload failed: ${err.message}. Is the backend running at http://${window.location.hostname}:8000 ?` })
       setIsProcessing(false)
@@ -89,73 +110,152 @@ export default function Upload({ onNewMessage }) {
     }
   }
 
+  // Clear the selected file
+  function clearFile() {
+    setFile(null)
+    // Reset the file input
+    const fileInput = document.getElementById('file-input')
+    if (fileInput) fileInput.value = ''
+  }
+
+  // Stop the current request
+  function handleStop() {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
+    setIsProcessing(false)
+    setStatus("Stopped by user")
+    onNewMessage({ type: "info", text: "Request stopped by user" })
+  }
+
   async function handleChat(e) {
     e.preventDefault()
-    if (!prompt) return
-    
+
+    // Allow submission if there's a prompt OR if there's a file to process
+    const hasFile = file && !employeeId && !isProcessing
+    if (!prompt && !hasFile) return
+
     const currentPrompt = prompt
-    setStatus("Sending prompt...")
-    
-    // Clear the input box immediately after user hits enter
-    setPrompt("")
-    
+    const currentFile = file
+    setPrompt("")  // Clear input immediately
+
     try {
-      // show the user's prompt above the reply in the UI
-      onNewMessage({ type: "user", text: currentPrompt })
+      // If a file is selected and not yet processed, upload it first
+      if (hasFile) {
+        // Show the attachment in chat history when submitting
+        onNewMessage({ type: "attachment", filename: currentFile.name })
+        clearFile()  // Clear the preview
 
-      // If a file is selected and not yet processed, upload it first (merged behavior)
-      if (file && !employeeId && !isProcessing) {
-        await uploadAndWait()
-      }
+        const newEmployeeId = await uploadAndWait(currentFile)
 
-      const base = await findBackendBase()
-      if (!base) {
-        onNewMessage({ type: "error", text: `Cannot reach backend for chat: tried several hosts on port 8000.` })
-        setStatus("Backend unreachable")
-        return
-      }
-      const res = await fetch(`${base}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: currentPrompt, employee_id: employeeId }),
-      })
-
-      if (!res.ok) {
-        // try to parse JSON error from server
-        let errText = null
-        try {
-          const errJson = await res.json()
-          errText = errJson.detail || errJson.error || JSON.stringify(errJson)
-        } catch (err) {
-          errText = await res.text()
+        // If no prompt was provided, just show success message and return
+        if (!currentPrompt) {
+          if (newEmployeeId) {
+            onNewMessage({ type: "assistant", text: `Resume processed successfully! Employee ID: ${newEmployeeId}. You can now ask questions about this candidate.` })
+          }
+          return
         }
-        setStatus("Error from server")
-        onNewMessage({ type: "error", text: `Error: ${errText}` })
-        return
       }
 
-      const json = await res.json()
-      setStatus("Reply received")
-      onNewMessage({ type: "assistant", text: json.reply })
+      // If there's a prompt, continue with chat
+      if (currentPrompt) {
+        setIsProcessing(true)
+        setStatus("Sending prompt...")
+        onNewMessage({ type: "user", text: currentPrompt })
+
+        // Create abort controller for chat request
+        abortControllerRef.current = new AbortController()
+        const signal = abortControllerRef.current.signal
+
+        const base = await findBackendBase()
+        if (!base) {
+          onNewMessage({ type: "error", text: `Cannot reach backend for chat: tried several hosts on port 8000.` })
+          setStatus("Backend unreachable")
+          setIsProcessing(false)
+          return
+        }
+        const res = await fetch(`${base}/api/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: currentPrompt,
+            employee_id: employeeId,
+            session_id: sessionId  // Send session_id for conversation memory
+          }),
+          signal
+        })
+
+        if (!res.ok) {
+          let errText = null
+          try {
+            const errJson = await res.json()
+            errText = errJson.detail || errJson.error || JSON.stringify(errJson)
+          } catch (err) {
+            errText = await res.text()
+          }
+          setStatus("Error from server")
+          onNewMessage({ type: "error", text: `Error: ${errText}` })
+          setIsProcessing(false)
+          return
+        }
+
+        const json = await res.json()
+        setStatus("Reply received")
+        setIsProcessing(false)
+
+        // Store session_id for conversation continuity
+        if (json.session_id) {
+          setSessionId(json.session_id)
+        }
+
+        // Store employee_id if found (from name search or original upload)
+        if (json.employee_id && !employeeId) {
+          setEmployeeId(json.employee_id)
+          console.log(`Found employee by name search: ${json.employee_name} (ID: ${json.employee_id})`)
+        }
+
+        onNewMessage({ type: "assistant", text: json.reply })
+      }
     } catch (err) {
+      // Check if it was aborted by user
+      if (err.name === 'AbortError') {
+        return  // Already handled by handleStop
+      }
       setStatus("Network error")
+      setIsProcessing(false)
       onNewMessage({ type: "error", text: `Network error: ${err.message}. Is the backend running at http://${window.location.hostname}:8000 ?` })
     }
   }
 
   return (
     <div className="upload">
+      {/* File preview above input - shown when file is selected but not yet submitted */}
+      {file && !isProcessing && (
+        <div className="file-preview">
+          <div className="file-preview-content">
+            <span className="file-icon">📄</span>
+            <span className="file-name">{file.name}</span>
+            <button
+              type="button"
+              className="file-remove-btn"
+              onClick={clearFile}
+              title="Remove file"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
       <form onSubmit={handleChat} className="chat-input-container">
-        <input 
-          type="file" 
-          accept="application/pdf" 
+        <input
+          type="file"
+          accept="application/pdf"
           onChange={(e) => {
             const selectedFile = e.target.files[0]
             setFile(selectedFile)
-            // Show the attached file immediately as a message
-            if (selectedFile) {
-              onNewMessage({ type: "attachment", filename: selectedFile.name })
-            }
+            // File preview is shown above input, not in chat history
           }}
           id="file-input"
           style={{ display: 'none' }}
@@ -163,9 +263,9 @@ export default function Upload({ onNewMessage }) {
         <label htmlFor="file-input" className="file-picker-btn" title="Attach PDF">
           <span className="plus-icon">+</span>
         </label>
-        
-        <input 
-          value={prompt} 
+
+        <input
+          value={prompt}
           onChange={(e) => {
             const v = e.target.value
             setPrompt(v)
@@ -175,13 +275,20 @@ export default function Upload({ onNewMessage }) {
             } catch (err) {
               // ignore storage errors
             }
-          }} 
-          placeholder="Ask anything"
+          }}
+          placeholder={isProcessing ? "Waiting for response..." : "Ask anything"}
           className="prompt-input"
+          disabled={isProcessing}
         />
-        <button type="submit" className="send-btn" disabled={isProcessing}>
-          {isProcessing ? "Processing..." : "Send"}
-        </button>
+        {isProcessing ? (
+          <button type="button" className="stop-btn" onClick={handleStop} title="Stop">
+            <span className="stop-icon">■</span>
+          </button>
+        ) : (
+          <button type="submit" className="send-btn">
+            Send
+          </button>
+        )}
       </form>
       {status && <div className="status">{status}</div>}
     </div>

@@ -195,6 +195,11 @@ overflow: hidden; /* Prevent body scroll */
   color: #999;
 }
 
+.prompt-input:disabled {
+  background: #f5f5f5;
+  cursor: not-allowed;
+}
+
 .send-btn {
   background: #000;
   color: white;
@@ -224,4 +229,85 @@ overflow: hidden; /* Prevent body scroll */
   background: #ccc;
   cursor: not-allowed;
   box-shadow: none;
+}
+
+/* Stop button styling */
+.stop-btn {
+  background: #000;
+  color: white;
+  border: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stop-btn:hover {
+  background: #333;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  transform: scale(1.05);
+}
+
+.stop-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* File preview above input box */
+.file-preview {
+  max-width: 800px;
+  margin: 0 auto 12px;
+  padding: 0 20px;
+}
+
+.file-preview-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 20px;
+  padding: 8px 12px 8px 14px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
+.file-icon {
+  font-size: 16px;
+}
+
+.file-name {
+  font-size: 13px;
+  color: #333;
+  font-weight: 500;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-remove-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: #f0f0f0;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 12px;
+  color: #666;
+  transition: all 0.2s ease;
+  padding: 0;
+  margin-left: 4px;
+}
+
+.file-remove-btn:hover {
+  background: #ff4444;
+  color: white;
 }

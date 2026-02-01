@@ -3,7 +3,7 @@ import uuid
 import tempfile
 import subprocess
 import logging
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -18,6 +18,10 @@ from app.services.embeddings import Embeddings
 from app.services.vectorstore_faiss import FaissVectorStore
 from app.db.session import SessionLocal, engine
 from app.db import models
+
+# Configure logging BEFORE migrations (needed for migration logging)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("cv-chat")
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -91,10 +95,6 @@ except Exception as e:
 
 app = FastAPI(title="CV Chat PoC")
 
-# configure simple logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("cv-chat")
-
 
 # HTTP middleware to log incoming requests (method + path)
 @app.middleware("http")
@@ -123,6 +123,15 @@ FAISS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", 
 os.makedirs(FAISS_DIR, exist_ok=True)
 vectorstore = FaissVectorStore(FAISS_DIR)
 
+# Conversation memory store (session_id -> conversation history)
+# In production, use Redis or PostgreSQL for persistence
+from collections import defaultdict, deque
+conversation_store = defaultdict(lambda: deque(maxlen=10))  # Keep last 10 messages per session
+
+# Active employee store (session_id -> employee_id)
+# Tracks which employee is being discussed in each session for context continuity
+active_employee_store = {}  # {session_id: employee_id}
+
 
 @app.get("/api/llm-health")
 def llm_health():
@@ -132,7 +141,7 @@ def llm_health():
     - Otherwise tries the CLI.
     """
     try:
-        sample = llm.generate("Say hello and return a short token: HELLO_TEST", timeout=10)
+        sample = llm.generate("Say hello and return a short token: HELLO_TEST")
         return {"ok": True, "model": llm.model, "sample": sample}
     except Exception as e:
         return {"ok": False, "error": str(e), "model": llm.model}
@@ -150,81 +159,147 @@ class UploadResponse(BaseModel):
 
 
 @app.post("/api/upload-cv", response_model=UploadResponse)
-async def upload_cv(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_cv(file: UploadFile = File(...)):
+    """Upload a CV/resume PDF for processing."""
+    import threading
+
+    logger.info(f"[UPLOAD] ========== UPLOAD REQUEST RECEIVED ==========")
+    logger.info(f"[UPLOAD] Filename: {file.filename}")
+
     # save raw file to storage (GridFS or local fallback)
     contents = await file.read()
+    logger.info(f"[UPLOAD] Read {len(contents)} bytes from upload")
+
     file_id = storage.save_file(contents, filename=file.filename)
+    logger.info(f"[UPLOAD] Saved file with id: {file_id}")
+
     job_id = str(uuid.uuid4())
-    # enqueue background task
-    background_tasks.add_task(process_cv, file_id, file.filename, job_id)
+    logger.info(f"[UPLOAD] Generated job_id: {job_id}")
+
+    # Use a direct thread instead of BackgroundTasks to ensure it runs
+    # BackgroundTasks can sometimes have issues with blocking calls
+    logger.info(f"[UPLOAD] Starting background thread for processing...")
+
+    def run_process_cv():
+        try:
+            logger.info(f"[THREAD] Thread started for job {job_id}")
+            process_cv(file_id, file.filename, job_id)
+            logger.info(f"[THREAD] Thread completed for job {job_id}")
+        except Exception as e:
+            logger.exception(f"[THREAD] Thread exception for job {job_id}: {e}")
+
+    thread = threading.Thread(target=run_process_cv, daemon=True)
+    thread.start()
+    logger.info(f"[UPLOAD] Background thread started, returning response")
+
     return {"job_id": job_id, "status": "queued"}
 
 
-async def process_cv(file_id: str, filename: str, job_id: str):
+def process_cv(file_id: str, filename: str, job_id: str):
+    """Process CV in background thread.
+
+    NOTE: This is intentionally NOT async because it contains blocking calls
+    (subprocess.run, requests.post). FastAPI's BackgroundTasks will run this
+    in a thread pool automatically when it's a regular function.
+    """
+    logger.info(f"[PROCESS_CV] ========== STARTING BACKGROUND TASK ==========")
+    logger.info(f"[PROCESS_CV] job_id={job_id}, file_id={file_id}, filename={filename}")
+    logger.info(f"[PROCESS_CV] JOB_DIR={JOB_DIR}")
+    logger.info(f"[PROCESS_CV] JOB_DIR exists: {os.path.exists(JOB_DIR)}")
+
+    # Write initial "processing" status
+    try:
+        os.makedirs(JOB_DIR, exist_ok=True)  # Ensure directory exists
+        job_path = os.path.join(JOB_DIR, f"{job_id}.json")
+        with open(job_path, "w", encoding="utf-8") as jf:
+            jf.write('{"status":"processing","filename":"' + filename + '"}')
+        logger.info(f"[PROCESS_CV] ✓ Wrote initial job status to {job_path}")
+    except Exception as e:
+        logger.error(f"[PROCESS_CV] ✗ Failed to write initial job status: {e}")
+
     # fetch file bytes
+    logger.info(f"[PROCESS_CV] → Fetching file from storage: {file_id}")
     data = storage.get_file(file_id)
     if not data:
-        # log/raise
+        logger.error(f"[PROCESS_CV] ✗ Failed to fetch file from storage: {file_id}")
         # mark job as failed
         try:
             with open(os.path.join(JOB_DIR, f"{job_id}.json"), "w", encoding="utf-8") as jf:
                 jf.write('{"status":"failed","reason":"file_not_found"}')
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[PROCESS_CV] ✗ Failed to write failure status: {e}")
         return
+
+    logger.info(f"[PROCESS_CV] ✓ Fetched {len(data)} bytes from storage")
+
     # extract text
-    text = extract_text_from_bytes(data)
+    logger.info(f"[PROCESS_CV] → Extracting text from PDF...")
+    pdf_text = extract_text_from_bytes(data)
+    logger.info(f"[PROCESS_CV] ✓ Extracted {len(pdf_text)} characters from PDF")
+
     # log the raw extracted text excerpt for debugging
     try:
         with open(os.path.join(JOB_DIR, f"{job_id}.extracted.txt"), "w", encoding="utf-8") as ef:
-            ef.write(text[:5000])
-    except Exception:
-        pass
+            ef.write(pdf_text[:5000])
+        logger.info(f"[PROCESS_CV] ✓ Wrote extracted text to {job_id}.extracted.txt")
+    except Exception as e:
+        logger.error(f"[PROCESS_CV] ✗ Failed to write extracted text: {e}")
     # write a small debug marker for extraction length
     try:
         with open(os.path.join(JOB_DIR, f"{job_id}.meta.txt"), "w", encoding="utf-8") as mf:
-            mf.write(f"extracted_len={len(text)}")
+            mf.write(f"extracted_len={len(pdf_text)}")
     except Exception:
         pass
     # Store employee into SQL DB with auto-generated employeeID
     from sqlalchemy.orm import Session
     import json as _json
-
-    # Save extracted text to MongoDB in human-readable format
-    try:
-        extracted_doc = {
-            "filename": filename,
-            "extracted_text": text,
-            "extraction_date": str(uuid.uuid4()),  # Use as timestamp identifier
-            "text_length": len(text),
-            "file_id": file_id
-        }
-        # Store as JSON document in MongoDB (human-readable)
-        extracted_text_json = _json.dumps(extracted_doc, indent=2)
-        storage.save_file(extracted_text_json.encode('utf-8'), filename=f"{filename}_extracted.json")
-    except Exception as e:
-        logger.warning(f"Could not save extracted text to MongoDB: {e}")
+    # Note: Extracted data will be saved as human-readable JSON after LLM extraction
+    # using storage.save_extracted_data() which stores to MongoDB collection + local JSON file
 
     db: Session = SessionLocal()
     try:
-        # Generate employee_id in format 013449 (6 digits, zero-padded)
-        # Get next ID from sequence or count
-        try:
-            max_id = db.execute(text("SELECT COALESCE(MAX(id), 0) + 1 FROM employees")).scalar()
-        except:
-            max_id = 1
+        logger.info(f"[PROCESS_CV] {'='*50}")
+        logger.info(f"[PROCESS_CV] Processing CV: {filename}")
+        logger.info(f"[PROCESS_CV] Extracted text length: {len(pdf_text)} chars")
+        logger.info(f"[PROCESS_CV] Text preview: {pdf_text[:200]}...")
 
-        employee_id = str(max_id).zfill(6)  # Format: 013449
+        # Generate employee_id in format 013449 (6 digits, zero-padded)
+        # Query the actual max employee_id value (not the auto-increment id)
+        from sqlalchemy import text as sql_text  # Import with alias to avoid shadowing
+        try:
+            # Cast employee_id to integer to get the max, handling NULL and empty cases
+            result = db.execute(sql_text(
+                "SELECT COALESCE(MAX(CAST(employee_id AS INTEGER)), 0) + 1 FROM employees WHERE employee_id IS NOT NULL"
+            )).scalar()
+            next_id = result if result else 1
+            logger.info(f"[PROCESS_CV] Next employee_id will be: {next_id}")
+        except Exception as e:
+            logger.warning(f"[PROCESS_CV] Could not get max employee_id: {e}")
+            # Fallback: count existing records + 1
+            try:
+                count = db.query(models.Employee).count()
+                next_id = count + 1
+                logger.info(f"[PROCESS_CV] Using count-based fallback: {next_id}")
+            except Exception as e2:
+                logger.warning(f"[PROCESS_CV] Count fallback also failed: {e2}, using UUID-based ID")
+                # Last resort: use UUID-based unique ID
+                import time
+                next_id = int(time.time()) % 1000000  # Use timestamp-based ID
+                logger.info(f"[PROCESS_CV] Using timestamp-based ID: {next_id}")
+
+        employee_id = str(next_id).zfill(6)  # Format: 013449
+        logger.info(f"[PROCESS_CV] Generated employee_id: {employee_id}")
 
         emp = models.Employee(
             employee_id=employee_id,
             name=filename,  # Will be updated by LLM extraction
-            raw_text=text,
-            extracted_text=text
+            raw_text=pdf_text,
+            extracted_text=pdf_text
         )
         db.add(emp)
         db.commit()
         db.refresh(emp)
+        logger.info(f"[PROCESS_CV] ✓ Created employee record: ID={emp.id}, employee_id={emp.employee_id}")
         # RAG: chunk the text and index embeddings into FAISS
         try:
             def chunk_text(s: str, chunk_size: int = 500, overlap: int = 100):
@@ -238,7 +313,7 @@ async def process_cv(file_id: str, filename: str, job_id: str):
                     i += chunk_size - overlap
                 return chunks
 
-            chunks = chunk_text(text, chunk_size=500, overlap=100)
+            chunks = chunk_text(pdf_text, chunk_size=500, overlap=100)
             if chunks:
                 vectorstore.add_chunks(emp.id, chunks)
                 # annotate job meta with chunk count
@@ -258,15 +333,43 @@ async def process_cv(file_id: str, filename: str, job_id: str):
                     pass
         except Exception:
             pass
-        # LLM-driven structured extraction: ask the model to return JSON with name/email/phone/department/position
+        # LLM-driven COMPREHENSIVE structured extraction
+        logger.info(f"[PROCESS_CV] → Starting LLM extraction...")
         try:
             extraction_prompt = (
-                "You are a JSON extraction assistant. Given the following resume text,"
-                " extract the candidate's full name, primary email address, phone number, current/desired department, and current/desired position/job title."
-                " Return ONLY valid JSON with keys: name, email, phone, department, position. If a value is not present, return null."
-                " For department: extract team/department name (e.g., 'IT', 'HR', 'Engineering', 'Marketing')."
-                " For position: extract job title/role (e.g., 'Software Engineer', 'Manager', 'Analyst')."
-                " Resume text:\n\n" + (text[:4000] or "")
+                "You are a professional resume parser. Extract ALL information from the resume into JSON format.\n\n"
+                "CRITICAL RULES:\n"
+                "1. Return ONLY valid JSON - no explanations\n"
+                "2. Use null for missing fields\n"
+                "3. Do NOT guess or infer - only extract what's explicitly stated\n"
+                "4. For arrays (work_experience, education, skills), use proper JSON arrays\n\n"
+                "Required JSON structure:\n"
+                "{\n"
+                '  "name": "Full name",\n'
+                '  "email": "email@example.com",\n'
+                '  "phone": "+1-234-567-8900",\n'
+                '  "linkedin_url": "https://linkedin.com/in/...",\n'
+                '  "portfolio_url": "https://...",\n'
+                '  "github_url": "https://github.com/...",\n'
+                '  "department": "IT/HR/Engineering/etc",\n'
+                '  "position": "Job title",\n'
+                '  "career_objective": "Career objective/summary text",\n'
+                '  "summary": "Professional summary",\n'
+                '  "work_experience": ["Company: XYZ, Role: Engineer, Duration: 2020-2023, Responsibilities: ..."],\n'
+                '  "education": ["Degree: BS Computer Science, University: MIT, Year: 2020, GPA: 3.8"],\n'
+                '  "technical_skills": ["Python", "Java", "React", "AWS"],\n'
+                '  "soft_skills": ["Leadership", "Communication"],\n'
+                '  "languages": ["English (Native)", "Spanish (Fluent)"],\n'
+                '  "certifications": ["AWS Certified", "PMP"],\n'
+                '  "achievements": ["Won hackathon", "Published paper"],\n'
+                '  "hobbies": ["Photography", "Hiking"],\n'
+                '  "cocurricular_activities": ["President of CS Club"],\n'
+                '  "address": "Full address",\n'
+                '  "city": "City name",\n'
+                '  "country": "Country name"\n'
+                "}\n\n"
+                f"Resume text:\n\n{pdf_text[:8000]}\n\n"
+                "JSON output:"
             )
             # write prompt log for this job
             try:
@@ -275,48 +378,129 @@ async def process_cv(file_id: str, filename: str, job_id: str):
             except Exception:
                 pass
 
-            extraction_resp = llm.generate(extraction_prompt, timeout=30)
+            logger.info(f"[PROCESS_CV] → Sending extraction prompt to LLM ({len(extraction_prompt)} chars)...")
+            extraction_resp = llm.generate(extraction_prompt)
+            logger.info(f"[PROCESS_CV] ✓ LLM response received: {len(extraction_resp)} chars")
+            logger.info(f"[PROCESS_CV] → LLM response preview: {extraction_resp[:300]}...")
             # attempt to parse JSON from the response
             import json as _json
 
             parsed = None
             try:
                 parsed = _json.loads(extraction_resp)
-            except Exception:
+                logger.info(f"[PROCESS_CV] ✓ JSON parsed directly from LLM response")
+            except Exception as e:
+                logger.warning(f"[PROCESS_CV] ✗ Direct JSON parse failed: {e}")
                 # try to extract JSON substring
                 import re
 
                 m = re.search(r"\{.*\}", extraction_resp, re.S)
                 if m:
+                    logger.info(f"[PROCESS_CV] → Found JSON substring in response, attempting parse...")
                     try:
                         parsed = _json.loads(m.group(0))
-                    except Exception:
+                        logger.info(f"[PROCESS_CV] ✓ JSON extracted from substring")
+                    except Exception as e2:
+                        logger.error(f"[PROCESS_CV] ✗ JSON substring parse also failed: {e2}")
                         parsed = None
-            # Validate and potentially re-prompt using pydantic
-            from pydantic import BaseModel, ValidationError
+                else:
+                    logger.error(f"[PROCESS_CV] ✗ No JSON found in LLM response!")
 
-            class ExtractionModel(BaseModel):
+            # Log parsed content
+            if parsed:
+                logger.info(f"[PROCESS_CV] → Parsed JSON keys: {list(parsed.keys()) if isinstance(parsed, dict) else 'NOT A DICT'}")
+                if isinstance(parsed, dict):
+                    logger.info(f"[PROCESS_CV] → Parsed name: '{parsed.get('name')}'")
+                    logger.info(f"[PROCESS_CV] → Parsed email: '{parsed.get('email')}'")
+            else:
+                logger.error(f"[PROCESS_CV] ✗ No parsed data available - employee will have default values!")
+
+            # Validate using comprehensive Pydantic model
+            from pydantic import BaseModel, ValidationError, field_validator
+            from typing import List, Any
+            import json as _json_validator
+
+            class ComprehensiveExtractionModel(BaseModel):
+                # Basic Information
                 name: str | None = None
                 email: str | None = None
                 phone: str | None = None
+
+                # Online Presence
+                linkedin_url: str | None = None
+                portfolio_url: str | None = None
+                github_url: str | None = None
+
+                # Professional Info
                 department: str | None = None
                 position: str | None = None
+                career_objective: str | None = None
+                summary: str | None = None
+
+                # Experience & Education (arrays) - Accept strings or dicts, convert dicts to JSON strings
+                work_experience: List[Any] | None = None
+                education: List[Any] | None = None
+
+                # Skills (arrays) - Accept strings or dicts
+                technical_skills: List[Any] | None = None
+                soft_skills: List[Any] | None = None
+                languages: List[Any] | None = None
+
+                # Additional (arrays) - Accept strings or dicts
+                certifications: List[Any] | None = None
+                achievements: List[Any] | None = None
+                hobbies: List[Any] | None = None
+                cocurricular_activities: List[Any] | None = None
+
+                # Convert dict items to JSON strings for storage
+                @field_validator('work_experience', 'education', 'technical_skills', 'soft_skills',
+                               'languages', 'certifications', 'achievements', 'hobbies',
+                               'cocurricular_activities', mode='before')
+                @classmethod
+                def convert_dicts_to_strings(cls, v):
+                    if v is None:
+                        return None
+                    if isinstance(v, list):
+                        result = []
+                        for item in v:
+                            if isinstance(item, dict):
+                                # Convert dict to readable string
+                                result.append(_json_validator.dumps(item, ensure_ascii=False))
+                            else:
+                                result.append(str(item) if item is not None else None)
+                        return result
+                    return v
+
+                # Location
+                address: str | None = None
+                city: str | None = None
+                country: str | None = None
 
             parsed_model = None
             if isinstance(parsed, dict):
                 try:
-                    parsed_model = ExtractionModel(**parsed)
-                except ValidationError:
+                    parsed_model = ComprehensiveExtractionModel(**parsed)
+                    logger.info(f"[PROCESS_CV] ✓ Pydantic validation passed")
+                    logger.info(f"[PROCESS_CV] → Validated name: '{parsed_model.name}'")
+                    logger.info(f"[PROCESS_CV] → Validated email: '{parsed_model.email}'")
+                except ValidationError as ve:
+                    logger.warning(f"[PROCESS_CV] ✗ Validation error during extraction: {ve}")
                     parsed_model = None
+            else:
+                logger.error(f"[PROCESS_CV] ✗ Parsed data is not a dict: {type(parsed)}")
 
             # If parsed_model is missing 'name', try a stricter re-prompt once
             if not parsed_model or not parsed_model.name:
+                logger.warning(f"[PROCESS_CV] → Name not found in first extraction, trying retry prompt...")
                 try:
                     retry_prompt = (
-                        "You are a JSON extraction assistant. Return STRICT JSON only with keys:"
-                        " name, email, phone, department, position. Use null for missing values. Do NOT include any explanation."
-                        " Extract department (team/dept like 'IT', 'HR') and position (job title like 'Engineer', 'Manager')."
-                        " Here is the resume text:\n\n" + (text[:6000] or "")
+                        "CRITICAL: Extract resume data as STRICT JSON only. NO explanations.\n\n"
+                        "Return JSON with these keys (use null if not found):\n"
+                        "name, email, phone, linkedin_url, portfolio_url, github_url, department, position, "
+                        "career_objective, summary, work_experience, education, technical_skills, soft_skills, "
+                        "languages, certifications, achievements, hobbies, cocurricular_activities, address, city, country\n\n"
+                        "Arrays must use JSON array format: [\"item1\", \"item2\"]\n\n"
+                        f"Resume:\n\n{pdf_text[:8000]}\n\nJSON:"
                     )
                     # write retry prompt log
                     try:
@@ -324,7 +508,9 @@ async def process_cv(file_id: str, filename: str, job_id: str):
                             pf.write(retry_prompt[:10000])
                     except Exception:
                         pass
-                    retry_resp = llm.generate(retry_prompt, timeout=20)
+                    logger.info(f"[PROCESS_CV] → Sending retry prompt to LLM...")
+                    retry_resp = llm.generate(retry_prompt)
+                    logger.info(f"[PROCESS_CV] ✓ Retry response received: {len(retry_resp)} chars")
                     parsed2 = None
                     try:
                         parsed2 = _json.loads(retry_resp)
@@ -337,40 +523,113 @@ async def process_cv(file_id: str, filename: str, job_id: str):
                                 parsed2 = None
                     if isinstance(parsed2, dict):
                         try:
-                            parsed_model = ExtractionModel(**parsed2)
-                        except ValidationError:
+                            parsed_model = ComprehensiveExtractionModel(**parsed2)
+                        except ValidationError as ve:
+                            logger.warning(f"Retry validation error: {ve}")
                             parsed_model = None
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Retry extraction failed: {e}")
                     parsed_model = parsed_model
 
             if parsed_model:
-                name_val = parsed_model.name
-                email_val = parsed_model.email
-                phone_val = parsed_model.phone
-                department_val = parsed_model.department
-                position_val = parsed_model.position
-                if name_val:
-                    emp.name = name_val
-                if email_val:
-                    emp.email = email_val
-                if phone_val:
-                    try:
-                        setattr(emp, "phone", phone_val)
-                    except Exception:
-                        pass
-                if department_val:
-                    try:
-                        setattr(emp, "department", department_val)
-                    except Exception:
-                        pass
-                if position_val:
-                    try:
-                        setattr(emp, "position", position_val)
-                    except Exception:
-                        pass
+                logger.info(f"[PROCESS_CV] ✓ Final parsed_model available, setting fields...")
+                logger.info(f"[PROCESS_CV] → Final extracted name: '{parsed_model.name}'")
+                logger.info(f"[PROCESS_CV] → Final extracted email: '{parsed_model.email}'")
+                logger.info(f"[PROCESS_CV] → Final extracted phone: '{parsed_model.phone}'")
+                logger.info(f"[PROCESS_CV] → Final extracted position: '{parsed_model.position}'")
+
+                # Helper function to safely set attributes and convert arrays to JSON
+                def safe_set(obj, attr, value):
+                    if value is not None:
+                        try:
+                            # Convert lists to JSON string for TEXT columns
+                            if isinstance(value, list):
+                                value = _json.dumps(value, ensure_ascii=False)
+                            setattr(obj, attr, value)
+                            logger.info(f"[PROCESS_CV] → Set {attr} = '{str(value)[:50]}{'...' if len(str(value)) > 50 else ''}'")
+                        except Exception as e:
+                            logger.warning(f"[PROCESS_CV] ✗ Could not set {attr}: {e}")
+                    else:
+                        logger.debug(f"[PROCESS_CV] → Skipping {attr} (value is None)")
+
+                # Set all basic information
+                safe_set(emp, "name", parsed_model.name)
+                safe_set(emp, "email", parsed_model.email)
+                safe_set(emp, "phone", parsed_model.phone)
+
+                # Set online presence
+                safe_set(emp, "linkedin_url", parsed_model.linkedin_url)
+                safe_set(emp, "portfolio_url", parsed_model.portfolio_url)
+                safe_set(emp, "github_url", parsed_model.github_url)
+
+                # Set professional info
+                safe_set(emp, "department", parsed_model.department)
+                safe_set(emp, "position", parsed_model.position)
+                safe_set(emp, "career_objective", parsed_model.career_objective)
+                safe_set(emp, "summary", parsed_model.summary)
+
+                # Set experience & education (arrays → JSON)
+                safe_set(emp, "work_experience", parsed_model.work_experience)
+                safe_set(emp, "education", parsed_model.education)
+
+                # Set skills (arrays → JSON)
+                safe_set(emp, "technical_skills", parsed_model.technical_skills)
+                safe_set(emp, "soft_skills", parsed_model.soft_skills)
+                safe_set(emp, "languages", parsed_model.languages)
+
+                # Set additional info (arrays → JSON)
+                safe_set(emp, "certifications", parsed_model.certifications)
+                safe_set(emp, "achievements", parsed_model.achievements)
+                safe_set(emp, "hobbies", parsed_model.hobbies)
+                safe_set(emp, "cocurricular_activities", parsed_model.cocurricular_activities)
+
+                # Set location
+                safe_set(emp, "address", parsed_model.address)
+                safe_set(emp, "city", parsed_model.city)
+                safe_set(emp, "country", parsed_model.country)
+
                 db.add(emp)
                 db.commit()
+                logger.info(f"[PROCESS_CV] ✓ Successfully extracted and saved comprehensive data for employee {emp.employee_id}")
+                logger.info(f"[PROCESS_CV] → Final employee record: name='{emp.name}', email='{emp.email}'")
+
+                # Save extracted data as human-readable JSON to MongoDB and file
+                try:
+                    extracted_json = {
+                        "name": parsed_model.name,
+                        "email": parsed_model.email,
+                        "phone": parsed_model.phone,
+                        "linkedin_url": parsed_model.linkedin_url,
+                        "portfolio_url": parsed_model.portfolio_url,
+                        "github_url": parsed_model.github_url,
+                        "department": parsed_model.department,
+                        "position": parsed_model.position,
+                        "career_objective": parsed_model.career_objective,
+                        "summary": parsed_model.summary,
+                        "work_experience": parsed_model.work_experience,
+                        "education": parsed_model.education,
+                        "technical_skills": parsed_model.technical_skills,
+                        "soft_skills": parsed_model.soft_skills,
+                        "languages": parsed_model.languages,
+                        "certifications": parsed_model.certifications,
+                        "achievements": parsed_model.achievements,
+                        "hobbies": parsed_model.hobbies,
+                        "cocurricular_activities": parsed_model.cocurricular_activities,
+                        "address": parsed_model.address,
+                        "city": parsed_model.city,
+                        "country": parsed_model.country,
+                        "raw_text_preview": pdf_text[:1000] if pdf_text else None
+                    }
+                    doc_id = storage.save_extracted_data(emp.employee_id, filename, extracted_json)
+                    logger.info(f"[PROCESS_CV] ✓ Saved extracted JSON to MongoDB/file: {doc_id}")
+                except Exception as e:
+                    logger.warning(f"[PROCESS_CV] ✗ Failed to save extracted JSON: {e}")
+            else:
+                logger.error(f"[PROCESS_CV] ✗ EXTRACTION FAILED - parsed_model is None!")
+                logger.error(f"[PROCESS_CV] ✗ Employee will only have filename as name and raw_text!")
+                logger.error(f"[PROCESS_CV] → Check the LLM response and prompt logs in {JOB_DIR}")
         except Exception as e:
+            logger.exception(f"[PROCESS_CV] ✗ Exception during LLM extraction: {e}")
             # non-fatal: record extraction error in job file
             try:
                 with open(os.path.join(JOB_DIR, f"{job_id}.json"), "r", encoding="utf-8") as jf:
@@ -399,6 +658,7 @@ async def process_cv(file_id: str, filename: str, job_id: str):
 class ChatRequest(BaseModel):
     prompt: str
     employee_id: int | None = None
+    session_id: str | None = None  # For conversation memory
 
 
 @app.api_route("/api/chat", methods=["POST", "OPTIONS"])
@@ -418,9 +678,19 @@ async def chat(request: Request, req: ChatRequest | None = None):
         raise HTTPException(status_code=400, detail="Missing JSON body for chat request")
 
     # log incoming chat call and method
-    logger.info(f"/api/chat invoked via {request.method}")
+    logger.info(f"{'='*60}")
+    logger.info(f"[CHAT] Request received via {request.method}")
+    logger.info(f"[CHAT] Prompt: '{req.prompt[:100]}{'...' if len(req.prompt) > 100 else ''}'")
+    logger.info(f"[CHAT] Employee ID from request: {req.employee_id}")
+    logger.info(f"[CHAT] Session ID from request: {req.session_id}")
 
     prompt = req.prompt
+    session_id = req.session_id or str(uuid.uuid4())  # Generate session ID if not provided
+    logger.info(f"[CHAT] Using session ID: {session_id}")
+
+    # Retrieve conversation history for this session
+    conversation_history = list(conversation_store[session_id])
+    logger.info(f"[CHAT] Conversation history: {len(conversation_history)} messages")
 
     # Detect if this is a CRUD command and route accordingly
     crud_keywords = ["update", "delete", "remove", "create", "add", "change", "modify", "set"]
@@ -428,8 +698,10 @@ async def chat(request: Request, req: ChatRequest | None = None):
 
     # Check for employee-related context (e.g., "employee", "record", name patterns)
     has_employee_context = any(word in prompt.lower() for word in ["employee", "record", "person", "user", "from", "to"])
+    logger.info(f"[CHAT] CRUD detection: is_crud={is_crud}, has_employee_context={has_employee_context}")
 
     if is_crud and has_employee_context:
+        logger.info(f"[CHAT] → Routing to CRUD pipeline")
         # Route to NL-CRUD pipeline
         try:
             # Parse the command using the NL-CRUD parser
@@ -447,7 +719,7 @@ async def chat(request: Request, req: ChatRequest | None = None):
                 f"User command:\n{prompt}\n"
             )
 
-            parse_resp = llm.generate(parse_prompt, timeout=20)
+            parse_resp = llm.generate(parse_prompt)
 
             # Parse JSON
             import json as _json, re
@@ -550,44 +822,163 @@ async def chat(request: Request, req: ChatRequest | None = None):
             logger.exception("CRUD operation failed in chat endpoint")
             # Fall back to normal chat on error
             pass
-    if req.employee_id:
-        # minimal enrichment: fetch employee and include first 1000 chars
-        from sqlalchemy.orm import Session
 
-        db: Session = SessionLocal()
-        try:
+    # Fetch employee context - either by ID, session memory, or searching for name in prompt
+    logger.info(f"[CHAT] → Starting employee lookup...")
+    from sqlalchemy.orm import Session
+    db: Session = SessionLocal()
+    emp = None
+
+    try:
+        if req.employee_id:
+            # Direct lookup by ID from request
+            logger.info(f"[CHAT] → Looking up employee by ID from request: {req.employee_id}")
             emp = db.query(models.Employee).filter(models.Employee.id == req.employee_id).first()
             if emp:
-                # RAG: retrieve top relevant chunks for this employee and include them first
-                try:
-                    retrieved = vectorstore.search(req.prompt, top_k=5, employee_id=req.employee_id)
-                except Exception:
-                    retrieved = []
-                retrieved_text = "\n\n---\n\n".join([r.get("text", "") for r in retrieved])
-                
-                # Enhanced prompt with pronoun resolution instructions
-                context_instruction = (
-                    "You are answering questions about a candidate's resume. "
-                    "When the user uses pronouns like 'he', 'she', 'they', 'him', 'her', 'his', 'their', etc., "
-                    "they are referring to the candidate in the resume provided below. "
-                    "Answer naturally and interpret pronouns as referring to this candidate.\n\n"
+                logger.info(f"[CHAT] ✓ Found employee by ID: {emp.name} (ID: {emp.id})")
+                # Store as active employee for this session
+                active_employee_store[session_id] = emp.id
+                logger.info(f"[CHAT] → Stored as active employee for session")
+            else:
+                logger.warning(f"[CHAT] ✗ No employee found with ID: {req.employee_id}")
+        else:
+            # Step 1: Check if there's an active employee in this session
+            active_emp_id = active_employee_store.get(session_id)
+            if active_emp_id:
+                logger.info(f"[CHAT] → Found active employee in session: ID {active_emp_id}")
+                emp = db.query(models.Employee).filter(models.Employee.id == active_emp_id).first()
+                if emp:
+                    logger.info(f"[CHAT] ✓ Using session's active employee: '{emp.name}' (ID: {emp.id})")
+
+            # Step 2: If no active employee, search by name in prompt
+            if not emp:
+                logger.info(f"[CHAT] → No active employee in session, searching by name in prompt...")
+                all_employees = db.query(models.Employee).all()
+                logger.info(f"[CHAT] → Total employees in database: {len(all_employees)}")
+
+                # Log all employee names for debugging
+                if all_employees:
+                    names = [e.name for e in all_employees if e.name]
+                    logger.info(f"[CHAT] → Employee names in DB: {names}")
+
+                # Search for any employee name that appears in the user's prompt
+                for candidate in all_employees:
+                    if candidate.name and candidate.name.lower() in prompt.lower():
+                        emp = candidate
+                        logger.info(f"[CHAT] ✓ Found employee by EXACT name match: '{emp.name}' (ID: {emp.id})")
+                        # Store as active employee for this session
+                        active_employee_store[session_id] = emp.id
+                        logger.info(f"[CHAT] → Stored as active employee for session")
+                        break
+
+                # If no exact match, try partial matching (first name or last name)
+                if not emp:
+                    logger.info(f"[CHAT] → No exact match, trying partial name matching...")
+                    prompt_lower = prompt.lower()
+                    for candidate in all_employees:
+                        if candidate.name:
+                            # Split name into parts and check if any part is in the prompt
+                            name_parts = candidate.name.lower().split()
+                            for part in name_parts:
+                                if len(part) > 2 and part in prompt_lower:  # Skip very short parts
+                                    emp = candidate
+                                    logger.info(f"[CHAT] ✓ Found employee by PARTIAL name match: '{emp.name}' (matched on '{part}')")
+                                    # Store as active employee for this session
+                                    active_employee_store[session_id] = emp.id
+                                    logger.info(f"[CHAT] → Stored as active employee for session")
+                                    break
+                        if emp:
+                            break
+
+            if not emp:
+                logger.warning(f"[CHAT] ✗ No employee found - no active session employee and no name match in prompt")
+
+        if emp:
+            logger.info(f"[CHAT] → Using employee: {emp.name} (ID: {emp.id})")
+            logger.info(f"[CHAT] → Employee raw_text length: {len(emp.raw_text) if emp.raw_text else 0} chars")
+
+            # RAG: retrieve top relevant chunks for this employee and include them first
+            logger.info(f"[CHAT] → Performing RAG search...")
+            try:
+                retrieved = vectorstore.search(req.prompt, top_k=5, employee_id=emp.id)
+                logger.info(f"[CHAT] ✓ RAG retrieved {len(retrieved)} chunks")
+            except Exception as e:
+                logger.warning(f"[CHAT] ✗ RAG search failed: {e}")
+                retrieved = []
+            retrieved_text = "\n\n---\n\n".join([r.get("text", "") for r in retrieved])
+
+            # Build conversation history context
+            history_text = ""
+            if conversation_history:
+                history_text = "Previous conversation:\n"
+                for msg in conversation_history[-5:]:  # Last 5 exchanges
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    history_text += f"{role.capitalize()}: {content}\n"
+                history_text += "\n"
+
+            # Build structured employee data from database fields
+            structured_data = f"""
+=== EMPLOYEE DATABASE RECORD ===
+Employee ID: {emp.employee_id if hasattr(emp, 'employee_id') and emp.employee_id else 'N/A'}
+Name: {emp.name or 'N/A'}
+Email: {emp.email or 'N/A'}
+Phone: {emp.phone if hasattr(emp, 'phone') and emp.phone else 'N/A'}
+Department: {emp.department if hasattr(emp, 'department') and emp.department else 'N/A'}
+Position: {emp.position if hasattr(emp, 'position') and emp.position else 'N/A'}
+LinkedIn: {emp.linkedin_url if hasattr(emp, 'linkedin_url') and emp.linkedin_url else 'N/A'}
+Portfolio: {emp.portfolio_url if hasattr(emp, 'portfolio_url') and emp.portfolio_url else 'N/A'}
+GitHub: {emp.github_url if hasattr(emp, 'github_url') and emp.github_url else 'N/A'}
+City: {emp.city if hasattr(emp, 'city') and emp.city else 'N/A'}
+Country: {emp.country if hasattr(emp, 'country') and emp.country else 'N/A'}
+Career Objective: {emp.career_objective[:200] if hasattr(emp, 'career_objective') and emp.career_objective else 'N/A'}
+Technical Skills: {emp.technical_skills if hasattr(emp, 'technical_skills') and emp.technical_skills else 'N/A'}
+Education: {emp.education if hasattr(emp, 'education') and emp.education else 'N/A'}
+Work Experience: {emp.work_experience[:500] if hasattr(emp, 'work_experience') and emp.work_experience else 'N/A'}
+Certifications: {emp.certifications if hasattr(emp, 'certifications') and emp.certifications else 'N/A'}
+================================
+"""
+            logger.info(f"[CHAT] → Built structured employee data block")
+
+            # Enhanced prompt with pronoun resolution and hallucination prevention
+            context_instruction = (
+                "You are answering questions about an employee/candidate.\n\n"
+                "CRITICAL RULES:\n"
+                "1. Answer based on BOTH the database record AND resume information provided below.\n"
+                "2. For questions about Employee ID, email, phone, department - use the DATABASE RECORD section.\n"
+                "3. For questions about experience, skills, projects - use the resume/CV content.\n"
+                "4. If information is NOT available, say: 'I don't have that information.'\n"
+                "5. Do NOT guess, infer, or make up information.\n"
+                "6. Pronouns (he/she/they/him/her/his/their) refer to this employee.\n\n"
+            )
+
+            logger.info(f"[CHAT] → Building enriched prompt with context...")
+            if retrieved_text.strip():
+                prompt = (
+                    f"{context_instruction}"
+                    f"{history_text}"
+                    f"{structured_data}\n"
+                    f"=== RELEVANT RESUME EXCERPTS ===\n{retrieved_text}\n\n"
+                    f"=== FULL RESUME TEXT ===\n{emp.raw_text[:1500] if emp.raw_text else 'N/A'}\n\n"
+                    f"User Question: {req.prompt}"
                 )
-                
-                if retrieved_text.strip():
-                    prompt = (
-                        f"{context_instruction}"
-                        f"Relevant resume excerpts:\n{retrieved_text}\n\n"
-                        f"Full candidate record:\n{emp.raw_text[:1000]}\n\n"
-                        f"User question:\n{req.prompt}"
-                    )
-                else:
-                    prompt = (
-                        f"{context_instruction}"
-                        f"Candidate record:\n{emp.raw_text[:1000]}\n\n"
-                        f"User question:\n{req.prompt}"
-                    )
-        finally:
-            db.close()
+                logger.info(f"[CHAT] ✓ Prompt enriched with DB record + RAG chunks + resume")
+            else:
+                prompt = (
+                    f"{context_instruction}"
+                    f"{history_text}"
+                    f"{structured_data}\n"
+                    f"=== RESUME TEXT ===\n{emp.raw_text[:2000] if emp.raw_text else 'N/A'}\n\n"
+                    f"User Question: {req.prompt}"
+                )
+                logger.info(f"[CHAT] ✓ Prompt enriched with DB record + resume (no RAG chunks)")
+            logger.info(f"[CHAT] → Final prompt length: {len(prompt)} chars")
+        else:
+            # No employee found - prompt goes to LLM without context
+            logger.warning(f"[CHAT] ✗ NO EMPLOYEE CONTEXT - sending raw prompt to LLM!")
+            logger.warning(f"[CHAT] ✗ This is why you might get generic responses!")
+    finally:
+        db.close()
 
     # log chat prompt to file for debugging (timestamped)
     try:
@@ -600,12 +991,37 @@ async def chat(request: Request, req: ChatRequest | None = None):
     except Exception:
         pass
 
+    logger.info(f"[CHAT] → Calling LLM (Ollama) with 60s timeout...")
     try:
         resp = llm.generate(prompt)
+        logger.info(f"[CHAT] ✓ LLM response received: {len(resp)} chars")
+        logger.info(f"[CHAT] → Response preview: '{resp[:150]}{'...' if len(resp) > 150 else ''}'")
     except Exception as e:
-        logger.exception("LLM generation failed")
+        logger.exception("[CHAT] ✗ LLM generation failed")
         raise HTTPException(status_code=500, detail=str(e))
-    return {"reply": resp}
+
+    # Save conversation to memory
+    conversation_store[session_id].append({"role": "user", "content": req.prompt})
+    conversation_store[session_id].append({"role": "assistant", "content": resp})
+    logger.info(f"[CHAT] ✓ Conversation saved to memory (session: {session_id})")
+
+    # Return the employee_id (either from request or from name search)
+    found_employee_id = req.employee_id
+    if emp and not found_employee_id:
+        found_employee_id = emp.id
+
+    logger.info(f"[CHAT] → Returning response:")
+    logger.info(f"[CHAT]   - employee_id: {found_employee_id}")
+    logger.info(f"[CHAT]   - employee_name: {emp.name if emp else None}")
+    logger.info(f"[CHAT]   - session_id: {session_id}")
+    logger.info(f"{'='*60}")
+
+    return {
+        "reply": resp,
+        "session_id": session_id,  # Return session_id for subsequent requests
+        "employee_id": found_employee_id,  # Return found employee (by ID or name search)
+        "employee_name": emp.name if emp else None  # Also return name for context
+    }
 
 
 
@@ -634,7 +1050,7 @@ def chat_debug():
     """
     # LLM quick probe (use a short timeout so this stays snappy)
     try:
-        sample = llm.generate("Debug ping: return short token DEBUG_OK", timeout=5)
+        sample = llm.generate("Debug ping: return short token DEBUG_OK")
         llm_ok = True
     except Exception as e:
         sample = str(e)
@@ -678,6 +1094,52 @@ def job_status(job_id: str):
         return data
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/extracted/{employee_id}")
+def get_extracted_data(employee_id: str):
+    """Get extracted resume data in human-readable JSON format.
+
+    Args:
+        employee_id: The 6-digit employee ID (e.g., "000001")
+
+    Returns:
+        The extracted resume data as JSON
+    """
+    data = storage.get_extracted_data(employee_id)
+    if data:
+        return data
+    raise HTTPException(status_code=404, detail=f"No extracted data found for employee {employee_id}")
+
+
+@app.get("/api/employees")
+def list_employees():
+    """List all employees with their basic info.
+
+    Returns a summary of all employees in the database.
+    """
+    from sqlalchemy.orm import Session
+    db: Session = SessionLocal()
+    try:
+        employees = db.query(models.Employee).all()
+        result = []
+        for emp in employees:
+            result.append({
+                "id": emp.id,
+                "employee_id": emp.employee_id,
+                "name": emp.name,
+                "email": emp.email,
+                "phone": getattr(emp, "phone", None),
+                "department": getattr(emp, "department", None),
+                "position": getattr(emp, "position", None),
+                "city": getattr(emp, "city", None),
+                "has_raw_text": bool(emp.raw_text),
+                "has_technical_skills": bool(getattr(emp, "technical_skills", None)),
+                "has_work_experience": bool(getattr(emp, "work_experience", None))
+            })
+        return {"count": len(result), "employees": result}
+    finally:
+        db.close()
 
 
 
@@ -762,7 +1224,7 @@ def nl_command(body: dict):
     )
 
     try:
-        parse_resp = llm.generate(parse_prompt, timeout=20)
+        parse_resp = llm.generate(parse_prompt)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM parse failed: {e}")
 
