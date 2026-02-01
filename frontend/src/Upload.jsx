@@ -133,7 +133,8 @@ export default function Upload({ onNewMessage }) {
     e.preventDefault()
 
     // Allow submission if there's a prompt OR if there's a file to process
-    const hasFile = file && !employeeId && !isProcessing
+    // Note: Allow file upload even if employeeId exists (user can switch candidates)
+    const hasFile = file && !isProcessing
     if (!prompt && !hasFile) return
 
     const currentPrompt = prompt
