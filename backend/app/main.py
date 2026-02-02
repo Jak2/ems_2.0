@@ -722,25 +722,111 @@ async def chat(request: Request, req: ChatRequest | None = None):
             pass
     logger.info(f"[CHAT] CRUD detection: is_crud={is_crud}, has_employee_context={has_employee_context}")
 
-    # Detect "list all employees" / "show employee records" type queries
-    list_keywords = ["show", "list", "display", "get", "fetch", "all", "every", "records"]
-    employee_list_keywords = ["employees", "employee records", "employee details", "all records", "all employees", "everyone", "all people", "all candidates"]
+    # =====================================================
+    # COMPREHENSIVE LIST/READ DETECTION WITH ANTI-HALLUCINATION
+    # Handles: "show me all employee records", "list employees",
+    # "display everyone", "let me see all records", "what are the employee details",
+    # "show John and Sarah's details", "get all employees with emails", etc.
+    #
+    # ANTI-HALLUCINATION: When query is ambiguous (mentions employees but
+    # doesn't specify which one or "all"), ask for clarification instead
+    # of letting the LLM hallucinate fake data.
+    # =====================================================
     prompt_lower = prompt.lower()
+    word_count = len(prompt_lower.split())
 
-    is_list_query = (
-        any(kw in prompt_lower for kw in list_keywords) and
-        any(kw in prompt_lower for kw in employee_list_keywords)
-    )
+    # Comprehensive action keywords for LIST/READ operations
+    action_keywords = [
+        "show", "show me", "display", "list", "get", "fetch", "give me",
+        "tell me", "what are", "what is", "what's", "let me see", "i want to see",
+        "can you show", "could you show", "please show", "view", "see",
+        "who are", "who is", "how many", "count", "total"
+    ]
 
-    if is_list_query:
-        logger.info(f"[CHAT] → Detected employee list query")
-        from sqlalchemy.orm import Session
-        db: Session = SessionLocal()
+    # Keywords indicating "all employees" / list query (including singular forms)
+    all_employees_patterns = [
+        "all employees", "all employee", "everyone", "all records", "all people",
+        "all candidates", "employee records", "employee details", "employees",
+        "all the employees", "all the records", "every employee", "each employee",
+        "list of employees", "employee list", "people in the system",
+        "everyone in the system", "all staff", "all personnel"
+    ]
 
-        try:
-            employees = db.query(models.Employee).all()
+    # Keywords indicating SINGULAR/AMBIGUOUS employee reference (needs clarification)
+    singular_employee_patterns = [
+        "the employee record", "employee record", "the record", "this employee",
+        "the employee", "that employee", "an employee", "employee details",
+        "the candidate", "this candidate", "that candidate", "the person",
+        "this person", "that person", "their details", "their info",
+        "employee info", "employee information", "the employee's"
+    ]
 
-            if not employees:
+    # Check if this is a LIST ALL query
+    has_action = any(kw in prompt_lower for kw in action_keywords)
+    has_all_pattern = any(p in prompt_lower for p in all_employees_patterns)
+    has_singular_pattern = any(p in prompt_lower for p in singular_employee_patterns)
+
+    # Also detect direct patterns
+    is_list_query = (has_action and has_all_pattern) or \
+                    "show me all" in prompt_lower or \
+                    "list all" in prompt_lower or \
+                    "display all" in prompt_lower or \
+                    "get all" in prompt_lower or \
+                    "fetch all" in prompt_lower or \
+                    "all employees" in prompt_lower or \
+                    "employee records" in prompt_lower or \
+                    "how many employees" in prompt_lower or \
+                    "count employees" in prompt_lower or \
+                    "total employees" in prompt_lower
+
+    # =====================================================
+    # Check for READ queries about SPECIFIC employees
+    # "Show John's details", "What is Sarah's email?",
+    # "Tell me about John and Sarah", etc.
+    # =====================================================
+    from sqlalchemy.orm import Session
+    db: Session = SessionLocal()
+
+    try:
+        all_employees = db.query(models.Employee).all()
+
+        # Find which employees are mentioned in the prompt
+        mentioned_employees = []
+        for emp in all_employees:
+            if emp.name:
+                name_lower = emp.name.lower()
+                # Check full name match
+                if name_lower in prompt_lower:
+                    if emp not in mentioned_employees:
+                        mentioned_employees.append(emp)
+                else:
+                    # Check partial name match (first name, last name)
+                    for part in name_lower.split():
+                        if len(part) > 2 and part in prompt_lower:
+                            if emp not in mentioned_employees:
+                                mentioned_employees.append(emp)
+                            break
+
+        # Detect READ query for specific person(s)
+        # Patterns: "John's details", "about John", "tell me about", "show me John"
+        read_patterns = [
+            "'s details", "'s info", "'s information", "'s profile", "'s record",
+            "'s email", "'s phone", "'s department", "'s position", "'s role",
+            "'s skills", "'s experience", "'s education", "'s contact",
+            "about ", "details of ", "info of ", "information about ", "profile of "
+        ]
+        is_read_specific = len(mentioned_employees) > 0 and (
+            any(p in prompt_lower for p in read_patterns) or
+            any(p in prompt_lower for p in action_keywords)
+        )
+
+        # =====================================================
+        # HANDLE LIST ALL EMPLOYEES QUERY
+        # =====================================================
+        if is_list_query and len(mentioned_employees) == 0:
+            logger.info(f"[CHAT] → Detected LIST ALL employees query")
+
+            if not all_employees:
                 return {
                     "reply": "No employee records found in the database.",
                     "session_id": session_id,
@@ -749,63 +835,77 @@ async def chat(request: Request, req: ChatRequest | None = None):
                 }
 
             # Determine which fields the user wants to see
-            want_email = any(w in prompt_lower for w in ["email", "emails", "mail"])
-            want_phone = any(w in prompt_lower for w in ["phone", "phones", "number", "numbers", "contact"])
-            want_department = any(w in prompt_lower for w in ["department", "departments", "dept"])
-            want_position = any(w in prompt_lower for w in ["position", "positions", "role", "roles", "title", "job"])
-            want_skills = any(w in prompt_lower for w in ["skill", "skills", "technical"])
+            want_email = any(w in prompt_lower for w in ["email", "emails", "mail", "contact"])
+            want_phone = any(w in prompt_lower for w in ["phone", "phones", "number", "numbers", "mobile", "telephone"])
+            want_department = any(w in prompt_lower for w in ["department", "departments", "dept", "team"])
+            want_position = any(w in prompt_lower for w in ["position", "positions", "role", "roles", "title", "job", "designation"])
+            want_skills = any(w in prompt_lower for w in ["skill", "skills", "technical", "expertise"])
+            want_education = any(w in prompt_lower for w in ["education", "degree", "university", "college", "qualification"])
+            want_experience = any(w in prompt_lower for w in ["experience", "work history", "worked", "previous"])
+            want_address = any(w in prompt_lower for w in ["address", "location", "city"])
+            want_id = any(w in prompt_lower for w in ["id", "emp_id", "employee_id", "employee id"])
 
-            # If no specific fields requested, show basic info (name + ID)
-            show_all_fields = not any([want_email, want_phone, want_department, want_position, want_skills])
+            # If no specific fields requested, show basic info
+            no_specific_fields = not any([want_email, want_phone, want_department, want_position, want_skills, want_education, want_experience, want_address])
 
-            # Check if user is asking about specific people
-            specific_names = []
-            for emp in employees:
-                if emp.name:
-                    # Check if employee name is mentioned in the prompt
-                    name_lower = emp.name.lower()
-                    if name_lower in prompt_lower:
-                        specific_names.append(emp)
-                    else:
-                        # Check partial name match
-                        for part in name_lower.split():
-                            if len(part) > 2 and part in prompt_lower:
-                                if emp not in specific_names:
-                                    specific_names.append(emp)
-                                break
-
-            # Filter to specific employees if names were mentioned
-            display_employees = specific_names if specific_names else employees
+            # Handle count queries
+            if "how many" in prompt_lower or "count" in prompt_lower or "total" in prompt_lower:
+                return {
+                    "reply": f"There are **{len(all_employees)}** employee(s) in the database.",
+                    "session_id": session_id,
+                    "employee_id": None,
+                    "employee_name": None
+                }
 
             # Build the response
             response_lines = []
-            response_lines.append(f"**Employee Records ({len(display_employees)} {'selected' if specific_names else 'total'})**\n")
+            response_lines.append(f"## Employee Records ({len(all_employees)} total)\n")
 
-            for emp in display_employees:
-                line_parts = [f"• **{emp.name or 'Unknown'}** (ID: {emp.employee_id or emp.id})"]
+            for emp in all_employees:
+                line_parts = [f"### {emp.name or 'Unknown'}"]
+                line_parts.append(f"- **Employee ID**: {emp.employee_id or emp.id}")
 
-                if show_all_fields or want_email:
+                if no_specific_fields or want_email:
                     email = emp.email or 'N/A'
-                    line_parts.append(f"  Email: {email}")
+                    line_parts.append(f"- **Email**: {email}")
 
-                if show_all_fields or want_phone:
+                if no_specific_fields or want_phone:
                     phone = getattr(emp, 'phone', None) or 'N/A'
-                    line_parts.append(f"  Phone: {phone}")
+                    line_parts.append(f"- **Phone**: {phone}")
 
-                if show_all_fields or want_department:
+                if no_specific_fields or want_department:
                     dept = getattr(emp, 'department', None) or 'N/A'
-                    line_parts.append(f"  Department: {dept}")
+                    line_parts.append(f"- **Department**: {dept}")
 
-                if show_all_fields or want_position:
+                if no_specific_fields or want_position:
                     pos = getattr(emp, 'position', None) or 'N/A'
-                    line_parts.append(f"  Position: {pos}")
+                    line_parts.append(f"- **Position**: {pos}")
 
                 if want_skills:
                     skills = getattr(emp, 'technical_skills', None) or 'N/A'
-                    # Truncate if too long
-                    if skills and len(skills) > 100:
-                        skills = skills[:100] + "..."
-                    line_parts.append(f"  Skills: {skills}")
+                    if skills and len(skills) > 150:
+                        skills = skills[:150] + "..."
+                    line_parts.append(f"- **Skills**: {skills}")
+
+                if want_education:
+                    edu = getattr(emp, 'education', None) or 'N/A'
+                    if isinstance(edu, list):
+                        edu = ", ".join(str(e) for e in edu[:3])
+                    elif edu and len(str(edu)) > 100:
+                        edu = str(edu)[:100] + "..."
+                    line_parts.append(f"- **Education**: {edu}")
+
+                if want_experience:
+                    exp = getattr(emp, 'work_experience', None) or 'N/A'
+                    if isinstance(exp, list):
+                        exp = ", ".join(str(e) for e in exp[:3])
+                    elif exp and len(str(exp)) > 100:
+                        exp = str(exp)[:100] + "..."
+                    line_parts.append(f"- **Experience**: {exp}")
+
+                if want_address:
+                    addr = getattr(emp, 'address', None) or getattr(emp, 'location', None) or 'N/A'
+                    line_parts.append(f"- **Address**: {addr}")
 
                 response_lines.append("\n".join(line_parts))
 
@@ -822,8 +922,196 @@ async def chat(request: Request, req: ChatRequest | None = None):
                 "employee_name": None
             }
 
+        # =====================================================
+        # HANDLE READ QUERY FOR SPECIFIC EMPLOYEE(S)
+        # ALL queries go through LLM for natural conversation
+        # We just set the employee context here and let it fall through
+        # =====================================================
+        elif is_read_specific or (len(mentioned_employees) > 0 and has_action):
+            logger.info(f"[CHAT] → READ query for specific employee(s): {[e.name for e in mentioned_employees]}")
+            logger.info(f"[CHAT] → Routing to LLM with employee context for natural response")
+
+            # Store mentioned employees for LLM context
+            # We'll use the first mentioned employee as context
+            if mentioned_employees:
+                first_emp = mentioned_employees[0]
+                active_employee_store[session_id] = first_emp.id
+                logger.info(f"[CHAT] → Set active employee for LLM context: {first_emp.name}")
+
+            # Don't return here - fall through to LLM section for ALL queries
+
+    finally:
+        db.close()
+
+    # =====================================================
+    # ANTI-HALLUCINATION GUARD #1: AMBIGUOUS EMPLOYEE QUERIES
+    # When query mentions employees but doesn't specify which one(s)
+    # AND isn't clearly asking for "all", ask for clarification
+    # instead of letting the LLM hallucinate fake data.
+    # =====================================================
+
+    # Check if query is about employees but ambiguous (no specific name, not "all")
+    is_employee_related = has_action and (has_singular_pattern or has_employee_context)
+    is_ambiguous_employee_query = is_employee_related and not is_list_query and len(mentioned_employees) == 0
+
+    if is_ambiguous_employee_query and not is_crud:
+        logger.info(f"[CHAT] → Detected AMBIGUOUS employee query - asking for clarification")
+
+        # Get list of available employees for the clarification message
+        from sqlalchemy.orm import Session as ClarifySession
+        clarify_db: ClarifySession = SessionLocal()
+        try:
+            available_employees = clarify_db.query(models.Employee).all()
+            if available_employees:
+                emp_names = [e.name for e in available_employees if e.name]
+                if emp_names:
+                    emp_list = ", ".join(emp_names[:10])  # Show first 10
+                    if len(emp_names) > 10:
+                        emp_list += f", ... ({len(emp_names)} total)"
+                    clarification_reply = (
+                        f"Which employee would you like me to show?\n\n"
+                        f"**Available employees:** {emp_list}\n\n"
+                        f"You can say:\n"
+                        f"- \"Show me **[name]**'s details\"\n"
+                        f"- \"Display **all** employee records\"\n"
+                        f"- \"What is **[name]**'s email?\""
+                    )
+                else:
+                    clarification_reply = (
+                        "Which employee would you like me to show? "
+                        "Please specify the employee's name or say \"all employees\" to see everyone."
+                    )
+            else:
+                clarification_reply = (
+                    "There are no employee records in the database yet. "
+                    "Please upload a CV/resume first to create an employee record."
+                )
         finally:
-            db.close()
+            clarify_db.close()
+
+        conversation_store[session_id].append({"role": "user", "content": req.prompt})
+        conversation_store[session_id].append({"role": "assistant", "content": clarification_reply})
+
+        return {
+            "reply": clarification_reply,
+            "session_id": session_id,
+            "employee_id": None,
+            "employee_name": None
+        }
+
+    # =====================================================
+    # ANTI-HALLUCINATION GUARD #2: VERY SHORT PROMPTS
+    # Prompts with < 3 words that mention employee-related terms
+    # are likely ambiguous and need clarification
+    # =====================================================
+    short_employee_keywords = ["employee", "record", "details", "info", "skills", "experience", "email", "phone"]
+    is_short_ambiguous = word_count <= 3 and any(kw in prompt_lower for kw in short_employee_keywords)
+
+    if is_short_ambiguous and not is_crud and len(mentioned_employees) == 0:
+        logger.info(f"[CHAT] → Detected SHORT AMBIGUOUS prompt - asking for clarification")
+
+        clarification_reply = (
+            f"Could you please be more specific? I'd be happy to help with employee information.\n\n"
+            f"**You can ask things like:**\n"
+            f"- \"Show me all employees\"\n"
+            f"- \"What is John's email?\"\n"
+            f"- \"Display Sarah's skills\"\n"
+            f"- \"List everyone's department\""
+        )
+
+        conversation_store[session_id].append({"role": "user", "content": req.prompt})
+        conversation_store[session_id].append({"role": "assistant", "content": clarification_reply})
+
+        return {
+            "reply": clarification_reply,
+            "session_id": session_id,
+            "employee_id": None,
+            "employee_name": None
+        }
+
+    # =====================================================
+    # ANTI-HALLUCINATION GUARD #3: NON-EXISTENT EMPLOYEE QUERIES
+    # When user asks about a specific name that doesn't exist
+    # =====================================================
+    # Check for patterns like "tell me about X" or "X's details" where X is not in DB
+    potential_name_patterns = [
+        r"about\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",  # "about John Smith"
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)'s\s+",     # "John's details"
+        r"employee\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", # "employee John"
+    ]
+
+    import re
+    potential_names = []
+    for pattern in potential_name_patterns:
+        matches = re.findall(pattern, prompt)  # Use original case
+        potential_names.extend(matches)
+
+    if potential_names and len(mentioned_employees) == 0 and has_action:
+        # User mentioned a name but no match found in DB
+        from sqlalchemy.orm import Session as NameCheckSession
+        name_db: NameCheckSession = SessionLocal()
+        try:
+            all_emp_names = [e.name.lower() for e in name_db.query(models.Employee).all() if e.name]
+
+            # Check if any potential name is NOT in the database
+            unmatched_names = [n for n in potential_names if n.lower() not in all_emp_names]
+
+            if unmatched_names:
+                logger.info(f"[CHAT] → Detected query about NON-EXISTENT employee: {unmatched_names}")
+
+                available = name_db.query(models.Employee).all()
+                if available:
+                    emp_list = ", ".join([e.name for e in available if e.name][:10])
+                    not_found_reply = (
+                        f"I couldn't find an employee named **{unmatched_names[0]}** in the database.\n\n"
+                        f"**Available employees:** {emp_list}\n\n"
+                        f"Would you like to see one of these instead?"
+                    )
+                else:
+                    not_found_reply = (
+                        f"I couldn't find an employee named **{unmatched_names[0]}** in the database. "
+                        f"There are no employee records yet. Please upload a CV first."
+                    )
+
+                conversation_store[session_id].append({"role": "user", "content": req.prompt})
+                conversation_store[session_id].append({"role": "assistant", "content": not_found_reply})
+
+                return {
+                    "reply": not_found_reply,
+                    "session_id": session_id,
+                    "employee_id": None,
+                    "employee_name": None
+                }
+        finally:
+            name_db.close()
+
+    # =====================================================
+    # ANTI-HALLUCINATION GUARD #4: LEADING QUESTION TRAPS
+    # Detect prompts that try to confirm false information
+    # =====================================================
+    leading_patterns = [
+        r"(?:i heard|someone said|they said|i was told)\s+.*(?:worked at|knows|has|is)",
+        r"(?:confirm|verify|validate)\s+(?:that|if)\s+",
+        r"(?:isn't it true|it's true that|obviously|everyone knows)",
+        r"(?:just say yes|just confirm|can you confirm)\s+",
+    ]
+
+    is_leading_question = any(re.search(p, prompt_lower) for p in leading_patterns)
+
+    # =====================================================
+    # ANTI-HALLUCINATION GUARD #5: PRESSURE/URGENCY PROMPTS
+    # Detect emotional manipulation attempts
+    # =====================================================
+    pressure_patterns = [
+        r"urgent", r"asap", r"immediately", r"right now", r"my job depends",
+        r"ceo is waiting", r"board meeting", r"please.*really need",
+        r"just this once", r"make an exception"
+    ]
+
+    is_pressure_prompt = any(re.search(p, prompt_lower) for p in pressure_patterns)
+
+    # Re-open database for CRUD operations if needed
+    # (The db was closed in the finally block above)
 
     if is_crud and has_employee_context:
         logger.info(f"[CHAT] → Routing to CRUD pipeline")
@@ -958,65 +1246,76 @@ async def chat(request: Request, req: ChatRequest | None = None):
     emp = None
 
     try:
-        if req.employee_id:
-            # Direct lookup by ID from request
-            logger.info(f"[CHAT] → Looking up employee by ID from request: {req.employee_id}")
-            emp = db.query(models.Employee).filter(models.Employee.id == req.employee_id).first()
-            if emp:
-                logger.info(f"[CHAT] ✓ Found employee by ID: {emp.name} (ID: {emp.id})")
+        # =====================================================
+        # PRIORITY FIX: ALWAYS search for employee in CURRENT prompt FIRST
+        # This ensures we respond to the employee actually being asked about,
+        # even if req.employee_id is set from a previous upload
+        # =====================================================
+        all_employees = db.query(models.Employee).all()
+        logger.info(f"[CHAT] → Total employees in database: {len(all_employees)}")
+
+        # Log all employee names for debugging
+        if all_employees:
+            names = [e.name for e in all_employees if e.name]
+            logger.info(f"[CHAT] → Employee names in DB: {names}")
+
+        # Step 1: Search for employee name in CURRENT prompt FIRST
+        logger.info(f"[CHAT] → Searching for employee name in current prompt...")
+        prompt_lower_for_search = req.prompt.lower()  # Use req.prompt directly
+
+        # Try exact full name match first
+        for candidate in all_employees:
+            if candidate.name and candidate.name.lower() in prompt_lower_for_search:
+                emp = candidate
+                logger.info(f"[CHAT] ✓ Found employee by EXACT name match: '{emp.name}' (ID: {emp.id})")
                 # Store as active employee for this session
                 active_employee_store[session_id] = emp.id
-                logger.info(f"[CHAT] → Stored as active employee for session")
-            else:
-                logger.warning(f"[CHAT] ✗ No employee found with ID: {req.employee_id}")
-        else:
-            # Step 1: Check if there's an active employee in this session
+                logger.info(f"[CHAT] → Updated active employee for session")
+                break
+
+        # If no exact match, try partial matching (first name or last name)
+        if not emp:
+            logger.info(f"[CHAT] → No exact match, trying partial name matching...")
+            for candidate in all_employees:
+                if candidate.name:
+                    # Split name into parts and check if any part is in the prompt
+                    name_parts = candidate.name.lower().split()
+                    for part in name_parts:
+                        if len(part) > 2 and part in prompt_lower_for_search:  # Skip very short parts
+                            emp = candidate
+                            logger.info(f"[CHAT] ✓ Found employee by PARTIAL name match: '{emp.name}' (matched on '{part}')")
+                            # Store as active employee for this session
+                            active_employee_store[session_id] = emp.id
+                            logger.info(f"[CHAT] → Updated active employee for session")
+                            break
+                if emp:
+                    break
+
+        # Step 2: If no employee mentioned in prompt, fall back to:
+        # a) active_employee_store (session memory - MOST RECENTLY discussed employee)
+        # b) req.employee_id (from frontend - only useful for first query after CV upload)
+        #
+        # IMPORTANT: Session memory comes FIRST because it reflects the current
+        # conversation context. When user says "what are his skills?", they mean
+        # the employee they JUST asked about, not the one from the CV upload.
+        if not emp:
             active_emp_id = active_employee_store.get(session_id)
             if active_emp_id:
-                logger.info(f"[CHAT] → Found active employee in session: ID {active_emp_id}")
+                logger.info(f"[CHAT] → No employee in prompt, using session's active employee (most recent): ID {active_emp_id}")
                 emp = db.query(models.Employee).filter(models.Employee.id == active_emp_id).first()
                 if emp:
                     logger.info(f"[CHAT] ✓ Using session's active employee: '{emp.name}' (ID: {emp.id})")
 
-            # Step 2: If no active employee, search by name in prompt
-            if not emp:
-                logger.info(f"[CHAT] → No active employee in session, searching by name in prompt...")
-                all_employees = db.query(models.Employee).all()
-                logger.info(f"[CHAT] → Total employees in database: {len(all_employees)}")
-
-                # Log all employee names for debugging
-                if all_employees:
-                    names = [e.name for e in all_employees if e.name]
-                    logger.info(f"[CHAT] → Employee names in DB: {names}")
-
-                # Search for any employee name that appears in the user's prompt
-                for candidate in all_employees:
-                    if candidate.name and candidate.name.lower() in prompt.lower():
-                        emp = candidate
-                        logger.info(f"[CHAT] ✓ Found employee by EXACT name match: '{emp.name}' (ID: {emp.id})")
-                        # Store as active employee for this session
-                        active_employee_store[session_id] = emp.id
-                        logger.info(f"[CHAT] → Stored as active employee for session")
-                        break
-
-                # If no exact match, try partial matching (first name or last name)
-                if not emp:
-                    logger.info(f"[CHAT] → No exact match, trying partial name matching...")
-                    prompt_lower = prompt.lower()
-                    for candidate in all_employees:
-                        if candidate.name:
-                            # Split name into parts and check if any part is in the prompt
-                            name_parts = candidate.name.lower().split()
-                            for part in name_parts:
-                                if len(part) > 2 and part in prompt_lower:  # Skip very short parts
-                                    emp = candidate
-                                    logger.info(f"[CHAT] ✓ Found employee by PARTIAL name match: '{emp.name}' (matched on '{part}')")
-                                    # Store as active employee for this session
-                                    active_employee_store[session_id] = emp.id
-                                    logger.info(f"[CHAT] → Stored as active employee for session")
-                                    break
-                        if emp:
-                            break
+            # Only fall back to req.employee_id if session has no active employee
+            # (e.g., first query after uploading a CV)
+            if not emp and req.employee_id:
+                logger.info(f"[CHAT] → No session employee, using employee_id from request: {req.employee_id}")
+                emp = db.query(models.Employee).filter(models.Employee.id == req.employee_id).first()
+                if emp:
+                    logger.info(f"[CHAT] ✓ Using employee from request: '{emp.name}' (ID: {emp.id})")
+                    active_employee_store[session_id] = emp.id
+                else:
+                    logger.warning(f"[CHAT] ✗ No employee found with ID: {req.employee_id}")
 
             if not emp:
                 logger.warning(f"[CHAT] ✗ No employee found - no active session employee and no name match in prompt")
@@ -1068,16 +1367,26 @@ Certifications: {emp.certifications if hasattr(emp, 'certifications') and emp.ce
 """
             logger.info(f"[CHAT] → Built structured employee data block")
 
-            # Enhanced prompt with pronoun resolution and hallucination prevention
+            # Enhanced prompt with pronoun resolution and comprehensive hallucination prevention
             context_instruction = (
                 "You are answering questions about an employee/candidate.\n\n"
-                "CRITICAL RULES:\n"
-                "1. Answer based on BOTH the database record AND resume information provided below.\n"
-                "2. For questions about Employee ID, email, phone, department - use the DATABASE RECORD section.\n"
-                "3. For questions about experience, skills, projects - use the resume/CV content.\n"
-                "4. If information is NOT available, say: 'I don't have that information.'\n"
-                "5. Do NOT guess, infer, or make up information.\n"
-                "6. Pronouns (he/she/they/him/her/his/their) refer to this employee.\n\n"
+                "=== CRITICAL ANTI-HALLUCINATION RULES ===\n"
+                "1. ONLY use information from the DATABASE RECORD and RESUME TEXT provided below.\n"
+                "2. For Employee ID, email, phone, department - use the DATABASE RECORD section.\n"
+                "3. For experience, skills, projects - use the resume/CV content.\n"
+                "4. If information is NOT available, say: 'That information is not available in the records.'\n"
+                "5. NEVER guess, infer, assume, or fabricate information.\n"
+                "6. NEVER confirm claims the user makes unless verified in the data.\n"
+                "7. If the user says 'I heard they worked at X' - verify against records first.\n"
+                "8. If the user asks leading questions, stick to the facts.\n"
+                "9. Do NOT invent salaries, dates, companies, or skills not in the data.\n"
+                "10. For short/ambiguous questions, ask for clarification.\n"
+                "11. Pronouns (he/she/they/him/her/his/their) refer to this employee.\n\n"
+                "=== RESPONSE GUIDELINES ===\n"
+                "- Preface answers with 'Based on the records...' or 'According to their resume...'\n"
+                "- For missing info: 'I don't have information about [topic] in the records.'\n"
+                "- For unverifiable claims: 'I cannot verify that claim from the available data.'\n"
+                "- Keep responses factual and grounded.\n\n"
             )
 
             logger.info(f"[CHAT] → Building enriched prompt with context...")
@@ -1102,9 +1411,67 @@ Certifications: {emp.certifications if hasattr(emp, 'certifications') and emp.ce
                 logger.info(f"[CHAT] ✓ Prompt enriched with DB record + resume (no RAG chunks)")
             logger.info(f"[CHAT] → Final prompt length: {len(prompt)} chars")
         else:
-            # No employee found - prompt goes to LLM without context
-            logger.warning(f"[CHAT] ✗ NO EMPLOYEE CONTEXT - sending raw prompt to LLM!")
-            logger.warning(f"[CHAT] ✗ This is why you might get generic responses!")
+            # =====================================================
+            # ANTI-HALLUCINATION GUARD #6: NO EMPLOYEE CONTEXT
+            # Instead of sending raw prompt to LLM (which causes hallucination),
+            # return a helpful message asking for clarification or offering options
+            # =====================================================
+            logger.warning(f"[CHAT] ✗ NO EMPLOYEE CONTEXT - checking if employee-related query")
+
+            # Check if this is an employee-related query that needs context
+            employee_related_keywords = [
+                "employee", "record", "details", "info", "skills", "experience",
+                "email", "phone", "department", "resume", "cv", "candidate",
+                "their", "his", "her", "profile", "data", "position"
+            ]
+            is_employee_query = any(kw in prompt_lower for kw in employee_related_keywords)
+
+            if is_employee_query:
+                logger.info(f"[CHAT] → Employee-related query without context - returning guidance")
+
+                # Get available employees for the response
+                guidance_employees = db.query(models.Employee).all()
+                if guidance_employees:
+                    emp_names = [e.name for e in guidance_employees if e.name][:10]
+                    emp_list = ", ".join(emp_names) if emp_names else "No named employees"
+
+                    no_context_reply = (
+                        "I need to know which employee you're asking about.\n\n"
+                        f"**Available employees:** {emp_list}\n\n"
+                        "**You can:**\n"
+                        "- Ask about a specific person: \"Show me **John's** details\"\n"
+                        "- See all employees: \"List **all employees**\"\n"
+                        "- Upload a new CV to add an employee"
+                    )
+                else:
+                    no_context_reply = (
+                        "There are no employee records in the database yet.\n\n"
+                        "**To get started:**\n"
+                        "1. Upload a CV/resume using the file picker\n"
+                        "2. Wait for it to be processed\n"
+                        "3. Then you can ask questions about that employee"
+                    )
+
+                conversation_store[session_id].append({"role": "user", "content": req.prompt})
+                conversation_store[session_id].append({"role": "assistant", "content": no_context_reply})
+
+                return {
+                    "reply": no_context_reply,
+                    "session_id": session_id,
+                    "employee_id": None,
+                    "employee_name": None
+                }
+            else:
+                # Non-employee query - we can send to LLM but with strict instructions
+                logger.info(f"[CHAT] → Non-employee query, using general response mode")
+                prompt = (
+                    "You are an Employee Management System assistant. "
+                    "The user's query doesn't seem to be about a specific employee.\n\n"
+                    "IMPORTANT: Do NOT make up employee data. If asked about employees, "
+                    "tell them to specify which employee or ask to see all employees.\n\n"
+                    f"User Query: {req.prompt}\n\n"
+                    "Respond helpfully but DO NOT fabricate any employee information."
+                )
     finally:
         db.close()
 

@@ -696,6 +696,163 @@ async function handleChat(e) {
 
 ---
 
+### Feature 9: Markdown Rendering Support
+
+**Approach**:
+1. Install `react-markdown` library for parsing markdown
+2. Wrap assistant responses with ReactMarkdown component
+3. Add comprehensive CSS styling for all markdown elements
+
+**Implementation**:
+```jsx
+import ReactMarkdown from "react-markdown"
+
+// In assistant message rendering
+<div className="assistant-reply markdown-content">
+  <ReactMarkdown>{m.text}</ReactMarkdown>
+</div>
+```
+
+**CSS Styling Added**:
+```css
+.markdown-content { text-align: left; line-height: 1.6; }
+.markdown-content h1 { font-size: 1.5em; border-bottom: 1px solid #eee; }
+.markdown-content h2 { font-size: 1.3em; font-weight: 600; }
+.markdown-content ul, .markdown-content ol { padding-left: 24px; }
+.markdown-content code { background: #f4f4f4; padding: 2px 6px; border-radius: 4px; }
+.markdown-content pre { background: #f8f8f8; padding: 12px 16px; border-radius: 8px; }
+.markdown-content table { border-collapse: collapse; width: 100%; }
+.markdown-content blockquote { border-left: 4px solid #ddd; padding: 8px 16px; }
+```
+
+**Supported Elements**: Headings (h1-h6), lists (ul/ol), code blocks, inline code, tables, blockquotes, links, bold, italic, horizontal rules.
+
+---
+
+### Feature 10: Comprehensive CRUD Detection via Natural Language
+
+**Approach**:
+1. Define extensive keyword lists for each CRUD operation type
+2. Match employee names against database records
+3. Detect specific fields requested in queries
+4. Route to appropriate database operation without LLM call
+
+**Implementation**:
+```python
+# Comprehensive action keywords for LIST/READ operations
+action_keywords = [
+    "show", "show me", "display", "list", "get", "fetch", "give me",
+    "tell me", "what are", "what is", "what's", "let me see", "i want to see",
+    "can you show", "could you show", "please show", "view", "see",
+    "who are", "who is", "how many", "count", "total"
+]
+
+all_employees_patterns = [
+    "all employees", "all employee", "everyone", "all records", "all people",
+    "all candidates", "employee records", "employee details", "employees",
+    "all the employees", "every employee", "list of employees", "all staff"
+]
+
+# Employee name matching
+mentioned_employees = []
+for emp in all_employees:
+    if emp.name:
+        name_lower = emp.name.lower()
+        if name_lower in prompt_lower:
+            mentioned_employees.append(emp)
+        else:
+            for part in name_lower.split():
+                if len(part) > 2 and part in prompt_lower:
+                    mentioned_employees.append(emp)
+                    break
+
+# Dynamic field detection
+want_email = any(w in prompt_lower for w in ["email", "emails", "mail", "contact"])
+want_phone = any(w in prompt_lower for w in ["phone", "phones", "number", "mobile"])
+want_department = any(w in prompt_lower for w in ["department", "dept", "team"])
+want_position = any(w in prompt_lower for w in ["position", "role", "title", "designation"])
+want_skills = any(w in prompt_lower for w in ["skill", "skills", "technical"])
+```
+
+**Query Types Supported**:
+- List all: "Show me all employees", "List everyone", "Display all staff"
+- Specific read: "Show John's details", "What is Sarah's email?"
+- Multi-person: "Tell me about John and Mike", "Show Sarah and John's departments"
+- Multi-field: "Show email, phone, and department of all employees"
+- Count: "How many employees are there?"
+
+---
+
+### Feature 11: Comprehensive Anti-Hallucination System
+
+**Problem**: LLMs can hallucinate fake employee data when queries are ambiguous, leading to fabricated names, emails, salaries, and other details that don't exist in the database.
+
+**Approach**: Implemented a 6-layer anti-hallucination guard system that intercepts potentially problematic queries BEFORE they reach the LLM.
+
+**Implementation**:
+
+```python
+# Layer 1: Ambiguous Employee Query Detection
+singular_employee_patterns = [
+    "the employee record", "employee record", "this employee",
+    "the employee", "that employee", "the candidate"
+]
+is_ambiguous = has_action and has_singular_pattern and len(mentioned_employees) == 0
+
+if is_ambiguous:
+    return "Which employee would you like me to show? Available: John, Sarah..."
+
+# Layer 2: Short Prompt Detection (< 3 words)
+if word_count <= 3 and any(kw in prompt_lower for kw in employee_keywords):
+    return "Could you please be more specific?"
+
+# Layer 3: Non-Existent Employee Detection
+potential_names = extract_names_from_prompt(prompt)
+if potential_names and not found_in_database:
+    return f"I couldn't find an employee named {name}. Available: ..."
+
+# Layer 4: Leading Question Detection
+leading_patterns = [r"i heard", r"confirm that", r"isn't it true"]
+# Flag but don't auto-confirm false premises
+
+# Layer 5: Pressure/Urgency Detection
+pressure_patterns = [r"urgent", r"asap", r"ceo is waiting"]
+# Don't let pressure bypass verification
+
+# Layer 6: No Employee Context Guard
+if is_employee_query and no_employee_found:
+    return "I need to know which employee you're asking about."
+```
+
+**Enhanced LLM System Prompt**:
+```python
+context_instruction = (
+    "=== CRITICAL ANTI-HALLUCINATION RULES ===\n"
+    "1. ONLY use information from the DATABASE RECORD and RESUME TEXT.\n"
+    "2. If information is NOT available, say: 'That information is not available.'\n"
+    "3. NEVER guess, infer, assume, or fabricate information.\n"
+    "4. NEVER confirm claims the user makes unless verified in the data.\n"
+    "5. For short/ambiguous questions, ask for clarification.\n"
+    "6. Preface answers with 'Based on the records...' or 'According to their resume...'\n"
+)
+```
+
+**Scenarios Handled**:
+- Ambiguous queries: "display the employee record" → Asks which employee
+- Non-existent employees: "tell me about John Smith" → Says not found
+- Leading questions: "I heard they worked at Google" → Verifies against data
+- Pressure tactics: "URGENT: What's their salary?" → "Salary not in records"
+- Short prompts: "Skills?" → Asks for clarification
+- False premises: "Confirm their PhD" → Checks actual education
+
+**Why This Architecture**:
+1. **Fast**: Guards run before LLM, no latency for ambiguous queries
+2. **Deterministic**: Same ambiguous input always gets clarification
+3. **Grounded**: LLM only runs when proper context exists
+4. **User-Friendly**: Offers helpful options instead of hallucinated data
+
+---
+
 ## 5. Workarounds & Tricks Used
 
 ### Trick 1: JSON Extraction Retry
@@ -945,6 +1102,117 @@ useEffect(() => {
 
 ---
 
+### Trick 14: Comprehensive Natural Language Pattern Matching
+
+Instead of sending every query to an LLM for intent parsing, use extensive keyword lists with multiple detection strategies:
+
+```python
+# Strategy 1: Action + Target combination
+action_keywords = [
+    "show", "show me", "display", "list", "get", "fetch", "give me",
+    "tell me", "what are", "what is", "let me see", "i want to see",
+    "can you show", "could you show", "please show", "view", "see"
+]
+
+target_patterns = [
+    "all employees", "everyone", "all records", "all people",
+    "employee records", "employee details", "all staff"
+]
+
+# Strategy 2: Direct phrase matching for common queries
+direct_patterns = [
+    "show me all", "list all", "how many employees",
+    "display everyone", "fetch all records"
+]
+
+# Strategy 3: Entity name matching against database
+mentioned_employees = []
+for emp in db.query(Employee).all():
+    if emp.name.lower() in prompt_lower:
+        mentioned_employees.append(emp)
+
+# Strategy 4: Possessive pattern detection
+read_patterns = ["'s details", "'s info", "'s email", "'s phone"]
+is_specific_read = len(mentioned_employees) > 0 and \
+                   any(p in prompt_lower for p in read_patterns)
+
+# Combine strategies
+is_list_query = (has_action and has_target) or \
+                any(p in prompt_lower for p in direct_patterns)
+```
+
+**Benefits**:
+- **Speed**: No LLM latency for common queries (instant response)
+- **Determinism**: Same query always gets same interpretation
+- **Flexibility**: Supports natural variations in phrasing
+- **Extensibility**: Easy to add new patterns without retraining
+
+**Pattern Categories Covered**:
+- Imperative: "Show all employees"
+- Question: "What are the employee emails?"
+- Request: "Can you display everyone?"
+- Possessive: "John's details"
+- Multi-target: "John and Sarah's departments"
+- Counting: "How many employees?"
+
+---
+
+### Trick 15: Real-Time Database Fetch (Not In-Memory Cache)
+
+A common concern: "How does the system respond so quickly? Is data cached in memory?"
+
+**Answer**: The fast responses are due to **bypassing the LLM entirely**, NOT caching. Data is fetched from PostgreSQL in real-time:
+
+```python
+# This is a LIVE database query, not cached data
+all_employees = db.query(models.Employee).all()  # SQLAlchemy → PostgreSQL
+
+# Fast because:
+# 1. Keyword matching happens instantly (Python string operations)
+# 2. PostgreSQL query for small tables is < 10ms
+# 3. No LLM call = no 5-200 second wait
+```
+
+**Why This Matters**:
+- **Data Integrity**: If employee records are modified directly in PostgreSQL (via admin panel, SQL, etc.), the chat will ALWAYS show the current state
+- **No Stale Data**: Every query fetches fresh data from the database
+- **Consistency**: There's no in-memory cache to invalidate or sync
+
+**Architecture Flow**:
+```
+User: "Show all employees"
+  ↓
+Keyword Detection (instant)
+  ↓
+PostgreSQL Query (< 10ms)
+  ↓
+Format Response
+  ↓
+Return (total: ~50ms)
+
+User: "Tell me about John's experience"
+  ↓
+Keyword Detection (instant)
+  ↓
+PostgreSQL Query to find John (< 10ms)
+  ↓
+RAG Search + LLM Call (5-30 seconds)
+  ↓
+Return (total: 5-30 seconds)
+```
+
+**The "instant" responses only occur for**:
+- List all employees
+- Specific employee lookups by name
+- Count queries
+- Clarification requests
+
+**Slow responses occur when**:
+- LLM needs to generate natural language (experience summaries, skill evaluations)
+- RAG search retrieves resume chunks for context
+
+---
+
 ## 6. Limitations & Known Issues
 
 ### Performance Limitations
@@ -1146,6 +1414,402 @@ return (
 
 ---
 
+### Error #20: Markdown Output Not Rendered as Formatted HTML
+
+**Symptom**: Backend responses contained markdown syntax (like `**bold**`, `- bullet points`, `### headings`) but displayed as raw text in the chat UI instead of formatted content.
+
+**Root Cause**: The React frontend was rendering the assistant reply text directly without parsing the markdown.
+
+```jsx
+// Before: Raw text rendering
+<div className="assistant-reply">{m.text}</div>
+// Outputs: "**Employee Records**" as plain text
+```
+
+**Solution**: Installed `react-markdown` library and wrapped assistant responses with ReactMarkdown component. Added comprehensive CSS styling for all markdown elements.
+
+```jsx
+// After: Markdown rendering
+import ReactMarkdown from "react-markdown"
+
+<div className="assistant-reply markdown-content">
+  <ReactMarkdown>{m.text}</ReactMarkdown>
+</div>
+// Outputs: "Employee Records" as bold heading
+```
+
+**CSS Added for Markdown Elements**:
+- Headings (h1-h6) with proper sizing and borders
+- Lists (ul, ol) with proper indentation
+- Code blocks and inline code with syntax highlighting
+- Tables with borders and alternating row colors
+- Blockquotes with left border styling
+- Links with hover effects
+
+---
+
+### Error #21: List/Read Queries Not Detecting All Natural Language Patterns
+
+**Symptom**: Queries like "show me all employee records", "let me see everyone", "display all staff" were not being detected as list operations.
+
+**Root Cause**: The keyword detection was too restrictive, requiring specific exact matches from limited keyword lists.
+
+```python
+# Before: Limited pattern matching
+list_keywords = ["show", "list", "display", "get", "fetch", "all", "every", "records"]
+employee_list_keywords = ["employees", "employee records", "all employees", "everyone"]
+
+is_list_query = (
+    any(kw in prompt_lower for kw in list_keywords) and
+    any(kw in prompt_lower for kw in employee_list_keywords)
+)
+# Failed to match: "show me all employee records" (requires both conditions)
+```
+
+**Solution**: Expanded to comprehensive pattern matching with 50+ action phrases and employee reference patterns.
+
+```python
+# After: Comprehensive pattern matching
+action_keywords = [
+    "show", "show me", "display", "list", "get", "fetch", "give me",
+    "tell me", "what are", "what is", "what's", "let me see", "i want to see",
+    "can you show", "could you show", "please show", "view", "see",
+    "who are", "who is", "how many", "count", "total"
+]
+
+all_employees_patterns = [
+    "all employees", "all employee", "everyone", "all records", "all people",
+    "all candidates", "employee records", "employee details", "employees",
+    "all the employees", "every employee", "list of employees", "all staff"
+]
+
+# Also added direct pattern detection for common phrases
+is_list_query = has_action and has_all_pattern or \
+                "show me all" in prompt_lower or \
+                "list all" in prompt_lower or \
+                "how many employees" in prompt_lower
+```
+
+**Patterns Now Supported**:
+- "Show me all employee records"
+- "Let me see everyone"
+- "Display all staff"
+- "What are the employee details"
+- "How many employees are there?"
+- "List all employees with their emails"
+- "Show John and Sarah's information"
+
+---
+
+### Error #22: Read Queries for Specific Employees Not Working
+
+**Symptom**: Queries like "Show John's details", "What is Sarah's email?", "Tell me about John and Mike" were not returning employee data.
+
+**Root Cause**: The system was only detecting list-all queries, not read queries targeting specific employees mentioned by name.
+
+**Solution**: Added employee name matching against the database and separate handling for specific employee read queries.
+
+```python
+# Find employees mentioned in the prompt
+mentioned_employees = []
+for emp in all_employees:
+    if emp.name:
+        name_lower = emp.name.lower()
+        # Check full name match
+        if name_lower in prompt_lower:
+            mentioned_employees.append(emp)
+        else:
+            # Check partial name match (first/last name)
+            for part in name_lower.split():
+                if len(part) > 2 and part in prompt_lower:
+                    mentioned_employees.append(emp)
+                    break
+
+# Detect READ patterns
+read_patterns = [
+    "'s details", "'s info", "'s email", "'s phone",
+    "'s department", "'s position", "'s skills",
+    "about ", "details of ", "tell me about "
+]
+is_read_specific = len(mentioned_employees) > 0 and \
+                   any(p in prompt_lower for p in read_patterns)
+```
+
+**Now Supports**:
+- "Show John's details" → Returns John's full profile
+- "What is Sarah's email?" → Returns just Sarah's email
+- "Tell me about John and Mike" → Returns both employees' info
+- "John's phone and department" → Returns specific fields only
+
+---
+
+### Error #23: LLM Hallucinating Fake Employee Data for Ambiguous Queries
+
+**Symptom**: When user typed "display the employee record" (singular, without specifying which employee), the LLM hallucinated a fake employee record with fabricated data:
+
+```
+Employee ID: 123456
+Name: John Doe
+Position: Software Developer
+Department: IT
+...
+```
+
+**Root Cause**: The query fell through multiple detection layers because:
+1. "employee record" (singular) wasn't in the `all_employees_patterns` list
+2. No specific employee name was mentioned
+3. It wasn't detected as a CRUD operation
+4. The raw prompt was sent to the LLM without context, which then hallucinated
+
+```python
+# Before: Ambiguous queries fell through to LLM
+else:
+    # No employee found - prompt goes to LLM without context
+    logger.warning(f"[CHAT] ✗ NO EMPLOYEE CONTEXT - sending raw prompt to LLM!")
+    # LLM then hallucinates fake employee data...
+```
+
+**Solution**: Implemented comprehensive anti-hallucination guards:
+
+1. **Ambiguous Query Detection**: Detect queries that mention employees but don't specify which one
+2. **Singular Pattern Recognition**: Added patterns like "the employee record", "this employee", "the candidate"
+3. **Clarification Requests**: Instead of passing to LLM, ask user to specify which employee
+4. **Non-Existent Employee Detection**: Catch queries about employees not in the database
+5. **Short Prompt Guards**: Ambiguous prompts with < 3 words trigger clarification
+6. **No Context Guard**: Employee-related queries without context return guidance instead of hallucinating
+
+```python
+# After: Multiple anti-hallucination guards
+singular_employee_patterns = [
+    "the employee record", "employee record", "the record", "this employee",
+    "the employee", "that employee", "an employee", "employee details",
+    "the candidate", "this candidate", "employee info"
+]
+
+is_ambiguous_employee_query = is_employee_related and not is_list_query and len(mentioned_employees) == 0
+
+if is_ambiguous_employee_query:
+    # Return clarification instead of hallucinating
+    clarification_reply = (
+        f"Which employee would you like me to show?\n\n"
+        f"**Available employees:** {emp_list}\n\n"
+        f"You can say:\n"
+        f"- \"Show me **[name]**'s details\"\n"
+        f"- \"Display **all** employee records\""
+    )
+    return {"reply": clarification_reply, ...}
+```
+
+**Now the system responds correctly:**
+- "display the employee record" → "Which employee would you like me to show? Available employees: John, Sarah..."
+- "show employee details" → Asks for clarification
+- "tell me about the candidate" → Asks which candidate
+
+---
+
+### Error #24: Analytical Questions Bypassing LLM (Returning Raw DB Data)
+
+**Symptom**: When user asked analytical questions like "tell me why debraj banik is suitable for a java backend role and what skills he needs to improve to become a senior employee", the system returned just the raw database fields instead of an intelligent analysis:
+
+```
+Debraj Banik
+- Position: Technical Lead
+- Skills: ["Languages: Javascript, JAVA, Python", ...]
+```
+
+**Expected**: An intelligent analysis explaining WHY the candidate is suitable and WHAT they need to improve.
+
+**Root Cause**: The anti-hallucination guards were too aggressive. They detected "debraj banik" in the database and immediately returned the DB record, bypassing the LLM entirely. This was fast (0.04s) but useless for analytical questions that require reasoning.
+
+```python
+# Before: ALL queries with mentioned employees bypassed LLM
+elif is_read_specific or (len(mentioned_employees) > 0 and has_action):
+    # Just dump DB data - no analysis!
+    return {"reply": format_employee_data(emp), ...}
+```
+
+**Solution**: Distinguish between **simple lookups** (can bypass LLM) and **analytical questions** (need LLM reasoning).
+
+```python
+# Analytical keywords that REQUIRE LLM reasoning
+analytical_keywords = [
+    "why", "suitable", "fit", "recommend", "should", "improve", "evaluate",
+    "assess", "compare", "better", "best", "good for", "qualified", "capable",
+    "analyze", "analysis", "opinion", "think", "suggest", "advice",
+    "strengths", "weaknesses", "gaps", "missing", "lack", "need to learn",
+    "ready for", "prepared for", "match", "hire", "promotion", "senior"
+]
+
+requires_llm_reasoning = any(kw in prompt_lower for kw in analytical_keywords)
+
+# In READ handler:
+if requires_llm_reasoning:
+    # Don't bypass LLM - let query fall through with employee context
+    active_employee_store[session_id] = mentioned_employees[0].id
+    # Fall through to LLM section...
+else:
+    # Simple lookup - can return DB data directly
+    return {"reply": format_employee_data(emp), ...}
+```
+
+**Now works correctly:**
+- "show debraj's details" → Fast (0.04s), returns DB data
+- "why is debraj suitable for java backend?" → LLM analyzes skills and responds intelligently
+- "what should debraj improve?" → LLM provides career advice based on profile
+
+**Key Insight**: Not all queries with mentioned employees are simple lookups. Questions with "why", "should", "suitable", "improve", "recommend" require LLM reasoning even when the employee exists in the database.
+
+---
+
+### Error #25: Keyword-Based Routing Still Felt Like Q&A (Not Conversational)
+
+**Symptom**: After implementing analytical keyword detection (Error #24), the system correctly routed analytical questions like "why is debraj suitable for java backend?" to the LLM. However, simple queries like "tell me about debraj" or "show jayaarunkumar's details" still returned raw database fields instantly (0.04s), making the chat feel like a question-answering system rather than a natural conversation.
+
+**User Feedback**: "I don't want this, i need it to go through the LLM because 1. it feels like questions and answers 2. not only the analytical questions i want ALL the questions to be passed through LLM"
+
+**Root Cause**: The analytical keyword approach was technically correct but philosophically wrong. The user wanted a **conversational AI assistant**, not a database query tool. Even simple lookups should be phrased naturally by the LLM rather than dumped as raw markdown lists.
+
+**Before (Keyword-Based Routing)**:
+```python
+# Detect analytical questions
+analytical_keywords = ["why", "suitable", "improve", "recommend", ...]
+requires_llm_reasoning = any(kw in prompt_lower for kw in analytical_keywords)
+
+if requires_llm_reasoning:
+    # Route to LLM with context
+    pass  # Fall through to LLM
+else:
+    # Simple lookup - bypass LLM, return raw DB data
+    return {"reply": format_employee_data(emp), ...}  # Fast but robotic
+```
+
+**After (All Queries Through LLM)**:
+```python
+# ALL queries for specific employees go through LLM
+# We just set context here and let it fall through
+elif is_read_specific or (len(mentioned_employees) > 0 and has_action):
+    logger.info(f"[CHAT] → READ query - Routing to LLM with employee context")
+
+    if mentioned_employees:
+        first_emp = mentioned_employees[0]
+        active_employee_store[session_id] = first_emp.id
+
+    # Fall through to LLM section - no return here
+    # LLM will format response naturally
+```
+
+**Trade-off**:
+- **Before**: "show debraj's details" → 0.04s (instant, raw data)
+- **After**: "show debraj's details" → 2-5s (LLM processes, natural response)
+
+**User chose the slower, more natural experience.** The LLM now formats all responses conversationally:
+- Instead of: `- **Email**: debraj@example.com`
+- Returns: `Based on the records, Debraj Banik's email address is debraj@example.com.`
+
+**Key Insight**: Performance isn't everything. Sometimes users prefer a slower, more human-like response over instant but robotic data dumps. The "fast path" was optimizing for the wrong metric.
+
+---
+
+### Error #26: Session Store Causing "Sticky" Employee Context (Wrong Employee Returned)
+
+**Symptom**: After asking about one employee (e.g., UDAYA), subsequent queries about different employees (e.g., Debraj, emp1) would still return the FIRST employee's details. The LLM would say "I couldn't find Debraj" even though Debraj exists in the database.
+
+**User Report**: "show debraj's details" → Returns "The details are for UDAYA TEJA REDDY KANJULA. If you need information about UDAYA..."
+
+**Database State**: Both UDAYA (ID: 21) and Debraj Banik (ID: 25) exist in the database with valid records.
+
+**Root Cause**: The LLM section's employee lookup had the WRONG priority order:
+
+```python
+# BEFORE: Session store was checked FIRST
+else:
+    # Step 1: Check if there's an active employee in this session
+    active_emp_id = active_employee_store.get(session_id)
+    if active_emp_id:
+        emp = db.query(...id == active_emp_id).first()  # ← Uses OLD employee!
+        # emp is now UDAYA, regardless of what was asked
+
+    # Step 2: If no active employee, search by name in prompt
+    if not emp:  # ← This NEVER runs after first query!
+        # Search for name in prompt...
+```
+
+Once UDAYA was stored as the active employee, **Step 2 was NEVER reached** because Step 1 always found an employee. The system was "stuck" on the first employee asked about.
+
+**Solution**: Reversed the priority order - search the CURRENT prompt FIRST, fall back to session store only if no name is mentioned:
+
+```python
+# AFTER: Search current prompt FIRST
+else:
+    all_employees = db.query(models.Employee).all()
+
+    # Step 1: Search for employee name in CURRENT prompt FIRST
+    for candidate in all_employees:
+        if candidate.name and candidate.name.lower() in prompt_lower_for_search:
+            emp = candidate
+            active_employee_store[session_id] = emp.id  # Update store
+            break
+
+    # Partial matching if no exact match...
+    if not emp:
+        for candidate in all_employees:
+            for part in candidate.name.lower().split():
+                if len(part) > 2 and part in prompt_lower_for_search:
+                    emp = candidate
+                    active_employee_store[session_id] = emp.id
+                    break
+
+    # Step 2: Only fall back to session store if NO employee mentioned
+    if not emp:
+        active_emp_id = active_employee_store.get(session_id)
+        if active_emp_id:
+            emp = db.query(...id == active_emp_id).first()
+```
+
+**Now Works Correctly**:
+
+| Query | Before | After |
+|-------|--------|-------|
+| 1st: "show udaya's details" | UDAYA ✓ | UDAYA ✓ |
+| 2nd: "show debraj's details" | UDAYA ✗ | Debraj ✓ |
+| 3rd: "what are his skills?" | UDAYA ✗ | Debraj ✓ (pronoun) |
+| 4th: "show emp1 details" | UDAYA ✗ | emp1 ✓ |
+
+**Key Insight**: Session stores are useful for **pronoun resolution** ("what are his skills?") but should NOT override explicit entity mentions. The priority should be: **Current prompt > Session memory > Ask for clarification**.
+
+**Additional Discovery**: The initial fix only handled the `else` branch (when no `employee_id` was sent). But the frontend was sending `employee_id` with EVERY chat request (from a previous CV upload). This meant the backend's `if req.employee_id:` branch always ran first, bypassing the name search entirely.
+
+**Complete Fix**: Removed the conditional and ALWAYS search the current prompt first, regardless of whether `employee_id` is provided:
+
+```python
+# BEFORE: employee_id checked first, name search only in else branch
+if req.employee_id:
+    emp = db.query(...id == req.employee_id).first()  # Always used!
+else:
+    # Name search (never reached if employee_id set)
+
+# AFTER: Always search prompt first
+all_employees = db.query(models.Employee).all()
+prompt_lower_for_search = req.prompt.lower()
+
+# Step 1: Search current prompt FIRST (exact, then partial)
+for candidate in all_employees:
+    if candidate.name.lower() in prompt_lower_for_search:
+        emp = candidate
+        break
+
+# Step 2: Fall back to employee_id or session store
+if not emp:
+    if req.employee_id:
+        emp = db.query(...id == req.employee_id).first()
+    elif active_employee_store.get(session_id):
+        emp = ...
+```
+
+**Lesson**: When building conversational systems, always ask: "What is the user asking about RIGHT NOW?" before falling back to historical context. And watch out for frontend state that persists across interactions!
+
+---
+
 ## 7. Lessons Learned
 
 ### Technical Lessons
@@ -1169,6 +1833,16 @@ return (
 9. **Make Pydantic models flexible for LLM output** - LLMs are unpredictable. Use `List[Any]` with validators instead of strict `List[str]` when accepting LLM-generated data.
 
 10. **Frontend state conditions can block features** - A condition like `!employeeId` might make sense initially but can prevent legitimate use cases (uploading multiple resumes).
+
+11. **Prevent LLM hallucination at the architecture level** - Don't rely solely on prompt engineering to prevent hallucination. Implement guards BEFORE the LLM call that detect ambiguous queries and return clarification requests. LLMs will fabricate data if given the chance—intercept problematic queries first.
+
+12. **Use layered anti-hallucination defenses** - Multiple detection layers (ambiguous queries, short prompts, non-existent entities, leading questions, pressure tactics) are more robust than a single check. Different attack vectors require different defenses.
+
+13. **Let user experience drive routing decisions** - Initially, we distinguished between "simple lookups" (bypass LLM for speed) and "analytical queries" (need LLM reasoning). This was technically correct but missed the user's actual goal: a conversational AI assistant. The user preferred slower but natural responses over instant but robotic data dumps. Lesson: Ask users whether they want speed or natural conversation before optimizing. Sometimes the "fast path" optimizes for the wrong metric.
+
+14. **All roads should lead to the LLM in a conversational system** - For a chat-based interface, route ALL queries through the LLM (except count/list operations). The LLM provides: natural language formatting, contextual phrasing, pronoun resolution, and a human-like experience. Only bypass the LLM for operations where raw data is actually expected (CSV export, bulk listing, counts).
+
+15. **Current prompt beats session memory** - In conversational systems, session stores are useful for pronoun resolution ("what are his skills?") but should NEVER override explicit entity mentions. The lookup priority should be: Current prompt → Session memory → Ask for clarification. If the user explicitly mentions "Debraj", don't return UDAYA just because UDAYA was discussed earlier.
 
 ### Process Lessons
 
@@ -1237,7 +1911,7 @@ DATABASE_URL=postgresql://user:pass@localhost/ems
 ---
 
 *Report generated for EMS 2.0 project documentation.*
-*Last updated: February 2, 2026*
+*Last updated: February 3, 2026*
 
 ---
 
@@ -1245,6 +1919,10 @@ DATABASE_URL=postgresql://user:pass@localhost/ems
 
 | Date | Changes |
 |------|---------|
-| Feb 2, 2026 | Added Errors #16-19: Response time not including PDF processing, message container positioning, auto-scroll missing, response time styling. Added Features #6-8: Employee listing, auto-scroll, full request timer. Added Tricks #9-13: Keyword intent detection, dynamic field detection, CSS viewport units, useRef for async timers, smooth scroll with delay. |
+| Feb 2, 2026 (Late Night) | Added Error #26: Session store causing "sticky" employee context. TWO issues found: (1) LLM section prioritized session store over current prompt, (2) Frontend sends `employee_id` with every request from previous CV upload, and backend's `if req.employee_id:` branch always ran first. Fix: Removed conditional - now ALWAYS searches current prompt first, then falls back to employee_id, then session store. Added Lesson #15: Current prompt beats session memory. |
+| Feb 2, 2026 (Night) | Added Error #25: Keyword-based routing still felt like Q&A. User requested ALL queries go through LLM for natural conversation, not just analytical ones. Removed fast lookup path entirely - all specific employee queries now route to LLM. Added Lesson #14: All roads should lead to the LLM in a conversational system. Updated Lesson #13 to reflect user experience over speed optimization. |
+| Feb 2, 2026 (Evening) | Added Error #24: Analytical questions bypassing LLM. Implemented analytical keyword detection to distinguish between simple lookups (bypass LLM for speed) and reasoning questions (require LLM analysis). Keywords like "why", "suitable", "improve", "recommend", "compare" now properly route to LLM with employee context. |
+| Feb 2, 2026 (PM) | Added Error #23: LLM hallucinating fake employee data for ambiguous queries. Added Feature #11: Comprehensive Anti-Hallucination System with 6-layer guards. Added Trick #15: Real-time database fetch explanation. Implemented anti-hallucination measures from HALLUCINATION_TEST_CASES.md including: ambiguous query detection, short prompt guards, non-existent employee detection, leading question traps, pressure/urgency detection, and no-context guards. Updated LLM system prompt with comprehensive anti-hallucination rules. |
+| Feb 2, 2026 (AM) | Added Errors #16-22: Response time not including PDF processing, message container positioning, auto-scroll missing, response time styling, markdown not rendered, list queries not detecting patterns, specific employee read queries failing. Added Features #6-10: Employee listing, auto-scroll, full request timer, markdown rendering support, comprehensive CRUD detection. Added Tricks #9-14: Keyword intent detection, dynamic field detection, CSS viewport units, useRef for async timers, smooth scroll with delay, comprehensive natural language pattern matching. |
 | Feb 1, 2026 | Added Errors #10-15: Variable shadowing, duplicate ID, Pydantic validation, multiple upload, BackgroundTasks, job status. Added Tricks #6-8. Updated Known Bugs. |
 | Initial | Errors #1-9, Features #1-5, Tricks #1-5 documented |
