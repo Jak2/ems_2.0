@@ -8,30 +8,25 @@ export default function App() {
   const [messages, setMessages] = useState([])
   const chatRef = useRef(null)
 
-  // Smooth-scroll the chat container to show newest messages with a small
-  // offset so the latest QA pair doesn't hug the absolute bottom. We keep
-  // this light-weight and defensive (clamp values) so it works across
-  // different layouts.
-  function scrollToBottom(offset = 40) {
+  // Smooth-scroll the chat container to the absolute bottom to show the
+  // latest message. Uses smooth behavior for better UX.
+  function scrollToBottom() {
     const el = chatRef.current
     if (!el) return
-    // compute desired scrollTop: max scroll minus offset
-    const max = el.scrollHeight - el.clientHeight
-    const target = Math.max(0, Math.floor(max - offset))
     try {
-      el.scrollTo({ top: target, behavior: "smooth" })
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" })
     } catch (err) {
       // fallback for older environments
-      el.scrollTop = target
+      el.scrollTop = el.scrollHeight
     }
   }
 
   // When messages change, scroll after a short delay so the layout has
-  // settled (images/avatars or font loads). The delay is small and
-  // improves perceived smoothness.
+  // settled (DOM updates, content rendering). This ensures the latest
+  // response is always visible at the bottom.
   useEffect(() => {
     if (!chatRef.current) return
-    const t = setTimeout(() => scrollToBottom(48), 60)
+    const t = setTimeout(() => scrollToBottom(), 100)
     return () => clearTimeout(t)
   }, [messages])
 

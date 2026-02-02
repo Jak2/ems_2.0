@@ -45,7 +45,6 @@ export default function Upload({ onNewMessage }) {
     // Create abort controller for this request
     abortControllerRef.current = new AbortController()
     const signal = abortControllerRef.current.signal
-    const uploadStartTime = Date.now()  // Start timing for upload
 
     try {
       const fd = new FormData()
@@ -77,10 +76,9 @@ export default function Upload({ onNewMessage }) {
           if (s.ok) {
             const j = await s.json()
             if (j.status === "done" && j.employee_id) {
-              const processingTime = ((Date.now() - uploadStartTime) / 1000).toFixed(1)
               setEmployeeId(j.employee_id)
-              onNewMessage({ type: "info", text: `Processing finished — employee id ${j.employee_id} (${processingTime}s)` })
-              setStatus(`Processed (employee ${j.employee_id}) in ${processingTime}s`)
+              onNewMessage({ type: "info", text: `CV processed — employee id ${j.employee_id}` })
+              setStatus(`Processed (employee ${j.employee_id})`)
               setIsProcessing(false)
               return j.employee_id
             }
@@ -144,6 +142,9 @@ export default function Upload({ onNewMessage }) {
     const currentFile = file
     setPrompt("")  // Clear input immediately
 
+    // Start timing from when user hits Send - captures entire request duration
+    requestStartTimeRef.current = Date.now()
+
     try {
       // If a file is selected and not yet processed, upload it first
       if (hasFile) {
@@ -153,10 +154,18 @@ export default function Upload({ onNewMessage }) {
 
         const newEmployeeId = await uploadAndWait(currentFile)
 
-        // If no prompt was provided, just show success message and return
+        // If no prompt was provided, show success message with total time and return
         if (!currentPrompt) {
+          const totalTime = requestStartTimeRef.current
+            ? ((Date.now() - requestStartTimeRef.current) / 1000).toFixed(2)
+            : null
+          requestStartTimeRef.current = null
           if (newEmployeeId) {
-            onNewMessage({ type: "assistant", text: `Resume processed successfully! Employee ID: ${newEmployeeId}. You can now ask questions about this candidate.` })
+            onNewMessage({
+              type: "assistant",
+              text: `Resume processed successfully! Employee ID: ${newEmployeeId}. You can now ask questions about this candidate.`,
+              responseTime: totalTime
+            })
           }
           return
         }
@@ -166,7 +175,6 @@ export default function Upload({ onNewMessage }) {
       if (currentPrompt) {
         setIsProcessing(true)
         setStatus("Sending prompt...")
-        requestStartTimeRef.current = Date.now()  // Start timing
         onNewMessage({ type: "user", text: currentPrompt })
 
         // Create abort controller for chat request

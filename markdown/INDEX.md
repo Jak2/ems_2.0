@@ -95,6 +95,7 @@ markdown/
 | [EMS_PROJECT_QUESTIONS.md](08-interview/EMS_PROJECT_QUESTIONS.md) | EMS 2.0 project-specific interview questions |
 | [TECHNOLOGY_QUESTIONS.md](08-interview/TECHNOLOGY_QUESTIONS.md) | LLM, Python, and technology interview questions |
 | [HALLUCINATION_TEST_CASES.md](08-interview/HALLUCINATION_TEST_CASES.md) | Edge cases for testing LLM hallucination |
+| [CRUD_TEST_SCENARIOS.md](08-interview/CRUD_TEST_SCENARIOS.md) | 295+ CRUD test scenarios for chat UI |
 
 ---
 

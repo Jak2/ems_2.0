@@ -21,9 +21,9 @@ background-image: linear-gradient(to right top, #79afff6d, #ccd1ef97, #ddddeb9e,
 overflow: hidden; /* Prevent body scroll */
 }
 
-.container { 
-  max-width: 900px; 
-  margin: 0 auto; 
+.container {
+  max-width: 900px;
+  margin: 0 auto;
   padding: 0;
   height: 100vh;
   display: flex;
@@ -38,25 +38,25 @@ overflow: hidden; /* Prevent body scroll */
   margin: 0;
   padding: 24px 0 20px;
   color: #1a1a1a;
-  /* background: #cdcdcd; */
+  flex-shrink: 0;
 }
 
-/* Chat area - scrollable with bottom padding for input gap */
-.chat { 
+/* Chat area - scrollable, positioned above input */
+.chat {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 12px 24px 20px;
+  padding: 12px 24px;
   margin: 0;
-  padding-bottom: 80px; /* Add extra space at bottom so messages don't hide under input */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
-/* Fixed input box at the bottom (5% up from bottom) */
-.upload { 
-  position: sticky;
-  bottom: 10vh;
-  padding: 16px 24px 24px;
-  /* background: #cdcdcd; */
+/* Input box fixed at bottom */
+.upload {
+  flex-shrink: 0;
+  padding: 16px 24px 12vh;
   z-index: 10;
 }
 
@@ -310,4 +310,14 @@ overflow: hidden; /* Prevent body scroll */
 .file-remove-btn:hover {
   background: #ff4444;
   color: white;
+}
+
+/* Response time styling - right aligned with separator */
+.response-time {
+  font-size: 11px;
+  color: #888;
+  text-align: right;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #eee;
 }

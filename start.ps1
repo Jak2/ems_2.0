@@ -215,8 +215,8 @@ Write-Host "  Frontend: http://localhost:5173" -ForegroundColor Gray
 Write-Host "  Backend:  http://localhost:8000" -ForegroundColor Gray
 Write-Host "  API Docs: http://localhost:8000/docs" -ForegroundColor Gray
 Write-Host "`nUsage:" -ForegroundColor White
-Write-Host "  .\start.ps1              # Start all (2 tabs)" -ForegroundColor Gray
+Write-Host "  .\start.ps1              # Start all (2 windows)" -ForegroundColor Gray
 Write-Host "  .\start.ps1 -SkipInstall # Skip npm/pip install" -ForegroundColor Gray
-Write-Host "  .\start.ps1 -BackendOnly # Only backend tab" -ForegroundColor Gray
-Write-Host "  .\start.ps1 -FrontendOnly # Only frontend tab" -ForegroundColor Gray
+Write-Host "  .\start.ps1 -BackendOnly # Only backend window" -ForegroundColor Gray
+Write-Host "  .\start.ps1 -FrontendOnly # Only frontend window" -ForegroundColor Gray
 Write-Host ""

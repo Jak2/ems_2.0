@@ -722,6 +722,109 @@ async def chat(request: Request, req: ChatRequest | None = None):
             pass
     logger.info(f"[CHAT] CRUD detection: is_crud={is_crud}, has_employee_context={has_employee_context}")
 
+    # Detect "list all employees" / "show employee records" type queries
+    list_keywords = ["show", "list", "display", "get", "fetch", "all", "every", "records"]
+    employee_list_keywords = ["employees", "employee records", "employee details", "all records", "all employees", "everyone", "all people", "all candidates"]
+    prompt_lower = prompt.lower()
+
+    is_list_query = (
+        any(kw in prompt_lower for kw in list_keywords) and
+        any(kw in prompt_lower for kw in employee_list_keywords)
+    )
+
+    if is_list_query:
+        logger.info(f"[CHAT] → Detected employee list query")
+        from sqlalchemy.orm import Session
+        db: Session = SessionLocal()
+
+        try:
+            employees = db.query(models.Employee).all()
+
+            if not employees:
+                return {
+                    "reply": "No employee records found in the database.",
+                    "session_id": session_id,
+                    "employee_id": None,
+                    "employee_name": None
+                }
+
+            # Determine which fields the user wants to see
+            want_email = any(w in prompt_lower for w in ["email", "emails", "mail"])
+            want_phone = any(w in prompt_lower for w in ["phone", "phones", "number", "numbers", "contact"])
+            want_department = any(w in prompt_lower for w in ["department", "departments", "dept"])
+            want_position = any(w in prompt_lower for w in ["position", "positions", "role", "roles", "title", "job"])
+            want_skills = any(w in prompt_lower for w in ["skill", "skills", "technical"])
+
+            # If no specific fields requested, show basic info (name + ID)
+            show_all_fields = not any([want_email, want_phone, want_department, want_position, want_skills])
+
+            # Check if user is asking about specific people
+            specific_names = []
+            for emp in employees:
+                if emp.name:
+                    # Check if employee name is mentioned in the prompt
+                    name_lower = emp.name.lower()
+                    if name_lower in prompt_lower:
+                        specific_names.append(emp)
+                    else:
+                        # Check partial name match
+                        for part in name_lower.split():
+                            if len(part) > 2 and part in prompt_lower:
+                                if emp not in specific_names:
+                                    specific_names.append(emp)
+                                break
+
+            # Filter to specific employees if names were mentioned
+            display_employees = specific_names if specific_names else employees
+
+            # Build the response
+            response_lines = []
+            response_lines.append(f"**Employee Records ({len(display_employees)} {'selected' if specific_names else 'total'})**\n")
+
+            for emp in display_employees:
+                line_parts = [f"• **{emp.name or 'Unknown'}** (ID: {emp.employee_id or emp.id})"]
+
+                if show_all_fields or want_email:
+                    email = emp.email or 'N/A'
+                    line_parts.append(f"  Email: {email}")
+
+                if show_all_fields or want_phone:
+                    phone = getattr(emp, 'phone', None) or 'N/A'
+                    line_parts.append(f"  Phone: {phone}")
+
+                if show_all_fields or want_department:
+                    dept = getattr(emp, 'department', None) or 'N/A'
+                    line_parts.append(f"  Department: {dept}")
+
+                if show_all_fields or want_position:
+                    pos = getattr(emp, 'position', None) or 'N/A'
+                    line_parts.append(f"  Position: {pos}")
+
+                if want_skills:
+                    skills = getattr(emp, 'technical_skills', None) or 'N/A'
+                    # Truncate if too long
+                    if skills and len(skills) > 100:
+                        skills = skills[:100] + "..."
+                    line_parts.append(f"  Skills: {skills}")
+
+                response_lines.append("\n".join(line_parts))
+
+            reply = "\n\n".join(response_lines)
+
+            # Save to conversation memory
+            conversation_store[session_id].append({"role": "user", "content": req.prompt})
+            conversation_store[session_id].append({"role": "assistant", "content": reply})
+
+            return {
+                "reply": reply,
+                "session_id": session_id,
+                "employee_id": None,
+                "employee_name": None
+            }
+
+        finally:
+            db.close()
+
     if is_crud and has_employee_context:
         logger.info(f"[CHAT] → Routing to CRUD pipeline")
         # Route to NL-CRUD pipeline
