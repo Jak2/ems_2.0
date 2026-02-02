@@ -4,20 +4,55 @@ An AI-powered Employee Management System that accepts CV/resume uploads, extract
 
 ## Quick Start
 
+### One-Click Start (Recommended)
+
+```powershell
+# Run from project root (as Administrator for database services)
+.\start.ps1
+
+# Or use the batch file
+.\start.bat
+```
+
+The startup script automatically:
+1. Checks and starts MongoDB service
+2. Checks and starts PostgreSQL service
+3. Checks Ollama and loads the configured LLM model
+4. Opens backend terminal (pip install + uvicorn)
+5. Opens frontend terminal (npm install + npm run dev)
+
+**Options:**
+```powershell
+.\start.ps1 -SkipInstall    # Skip npm/pip install (faster restart)
+.\start.ps1 -FrontendOnly   # Only start frontend
+.\start.ps1 -BackendOnly    # Only start backend
+```
+
+**Stop all services:**
+```powershell
+.\stop.ps1
+```
+
+### Manual Start
+
 ```bash
-# Backend
+# 1. Start databases (Windows - run as Administrator)
+net start MongoDB
+net start postgresql-x64-16
+
+# 2. Start Ollama
+ollama serve
+ollama pull qwen2.5:7b-instruct
+
+# 3. Backend (Terminal 1)
 cd backend
 pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-# Frontend
+# 4. Frontend (Terminal 2)
 cd frontend
 npm install
-npm start
-
-# Ollama (required)
-ollama serve
-ollama pull qwen2.5:7b-instruct
+npm run dev
 ```
 
 ## Tech Stack

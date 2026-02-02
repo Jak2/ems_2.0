@@ -697,7 +697,29 @@ async def chat(request: Request, req: ChatRequest | None = None):
     is_crud = any(keyword in prompt.lower() for keyword in crud_keywords)
 
     # Check for employee-related context (e.g., "employee", "record", name patterns)
-    has_employee_context = any(word in prompt.lower() for word in ["employee", "record", "person", "user", "from", "to"])
+    # Also check if any employee name from the database is mentioned in the prompt
+    has_employee_context = any(word in prompt.lower() for word in ["employee", "record", "person", "user", "from", "to", "candidate", "resume", "cv"])
+
+    # For delete/remove commands, also try to find employee by name in DB
+    if not has_employee_context and any(kw in prompt.lower() for kw in ["delete", "remove"]):
+        # Check if any employee name is mentioned
+        try:
+            from sqlalchemy.orm import Session as TempSession
+            temp_db: TempSession = SessionLocal()
+            all_emps = temp_db.query(models.Employee).all()
+            for e in all_emps:
+                if e.name and e.name.lower() in prompt.lower():
+                    has_employee_context = True
+                    break
+                # Also check partial name match
+                if e.name:
+                    for part in e.name.lower().split():
+                        if len(part) > 2 and part in prompt.lower():
+                            has_employee_context = True
+                            break
+            temp_db.close()
+        except Exception:
+            pass
     logger.info(f"[CHAT] CRUD detection: is_crud={is_crud}, has_employee_context={has_employee_context}")
 
     if is_crud and has_employee_context:
@@ -715,7 +737,10 @@ async def chat(request: Request, req: ChatRequest | None = None):
                 "Examples:\n"
                 "- 'Update Arun from IT to HR department' -> {\"action\":\"update\", \"employee_id\":null, \"employee_name\":\"Arun\", \"fields\":{\"department\":\"HR\"}}\n"
                 "- 'Update employee 123 email to x@y.com' -> {\"action\":\"update\", \"employee_id\":123, \"employee_name\":null, \"fields\":{\"email\":\"x@y.com\"}}\n"
-                "- 'Create employee John in IT' -> {\"action\":\"create\", \"employee_id\":null, \"employee_name\":null, \"fields\":{\"name\":\"John\", \"department\":\"IT\"}}\n\n"
+                "- 'Create employee John in IT' -> {\"action\":\"create\", \"employee_id\":null, \"employee_name\":null, \"fields\":{\"name\":\"John\", \"department\":\"IT\"}}\n"
+                "- 'Delete John' -> {\"action\":\"delete\", \"employee_id\":null, \"employee_name\":\"John\", \"fields\":{}}\n"
+                "- 'Remove employee 5' -> {\"action\":\"delete\", \"employee_id\":5, \"employee_name\":null, \"fields\":{}}\n"
+                "- 'Delete the employee Arun Kumar' -> {\"action\":\"delete\", \"employee_id\":null, \"employee_name\":\"Arun Kumar\", \"fields\":{}}\n\n"
                 f"User command:\n{prompt}\n"
             )
 
@@ -1219,7 +1244,10 @@ def nl_command(body: dict):
         "Examples:\n"
         "- 'Update Arun from IT to HR department' -> {\"action\":\"update\", \"employee_id\":null, \"employee_name\":\"Arun\", \"fields\":{\"department\":\"HR\"}}\n"
         "- 'Update employee 123 email to x@y.com' -> {\"action\":\"update\", \"employee_id\":123, \"employee_name\":null, \"fields\":{\"email\":\"x@y.com\"}}\n"
-        "- 'Create employee John in IT' -> {\"action\":\"create\", \"employee_id\":null, \"employee_name\":null, \"fields\":{\"name\":\"John\", \"department\":\"IT\"}}\n\n"
+        "- 'Create employee John in IT' -> {\"action\":\"create\", \"employee_id\":null, \"employee_name\":null, \"fields\":{\"name\":\"John\", \"department\":\"IT\"}}\n"
+        "- 'Delete John' -> {\"action\":\"delete\", \"employee_id\":null, \"employee_name\":\"John\", \"fields\":{}}\n"
+        "- 'Remove employee 5' -> {\"action\":\"delete\", \"employee_id\":5, \"employee_name\":null, \"fields\":{}}\n"
+        "- 'Delete the employee Arun Kumar' -> {\"action\":\"delete\", \"employee_id\":null, \"employee_name\":\"Arun Kumar\", \"fields\":{}}\n\n"
         f"User command:\n{cmd}\n"
     )
 

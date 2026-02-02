@@ -10,6 +10,7 @@ export default function Upload({ onNewMessage }) {
   const [isProcessing, setIsProcessing] = useState(false)
   const [sessionId, setSessionId] = useState(null)  // For conversation memory
   const abortControllerRef = useRef(null)  // For canceling requests
+  const requestStartTimeRef = useRef(null)  // For tracking response time
   // file selection is done via the input below; we no longer expose a separate
   // "Upload" button. The selected file will be uploaded automatically when the
   // user presses Send. This simplifies the UX as requested.
@@ -44,6 +45,7 @@ export default function Upload({ onNewMessage }) {
     // Create abort controller for this request
     abortControllerRef.current = new AbortController()
     const signal = abortControllerRef.current.signal
+    const uploadStartTime = Date.now()  // Start timing for upload
 
     try {
       const fd = new FormData()
@@ -75,9 +77,10 @@ export default function Upload({ onNewMessage }) {
           if (s.ok) {
             const j = await s.json()
             if (j.status === "done" && j.employee_id) {
+              const processingTime = ((Date.now() - uploadStartTime) / 1000).toFixed(1)
               setEmployeeId(j.employee_id)
-              onNewMessage({ type: "info", text: `Processing finished — employee id ${j.employee_id}` })
-              setStatus(`Processed (employee ${j.employee_id})`)
+              onNewMessage({ type: "info", text: `Processing finished — employee id ${j.employee_id} (${processingTime}s)` })
+              setStatus(`Processed (employee ${j.employee_id}) in ${processingTime}s`)
               setIsProcessing(false)
               return j.employee_id
             }
@@ -163,6 +166,7 @@ export default function Upload({ onNewMessage }) {
       if (currentPrompt) {
         setIsProcessing(true)
         setStatus("Sending prompt...")
+        requestStartTimeRef.current = Date.now()  // Start timing
         onNewMessage({ type: "user", text: currentPrompt })
 
         // Create abort controller for chat request
@@ -202,7 +206,14 @@ export default function Upload({ onNewMessage }) {
         }
 
         const json = await res.json()
-        setStatus("Reply received")
+
+        // Calculate response time
+        const responseTime = requestStartTimeRef.current
+          ? ((Date.now() - requestStartTimeRef.current) / 1000).toFixed(2)
+          : null
+        requestStartTimeRef.current = null
+
+        setStatus(responseTime ? `Reply received in ${responseTime}s` : "Reply received")
         setIsProcessing(false)
 
         // Store session_id for conversation continuity
@@ -216,7 +227,7 @@ export default function Upload({ onNewMessage }) {
           console.log(`Found employee by name search: ${json.employee_name} (ID: ${json.employee_id})`)
         }
 
-        onNewMessage({ type: "assistant", text: json.reply })
+        onNewMessage({ type: "assistant", text: json.reply, responseTime })
       }
     } catch (err) {
       // Check if it was aborted by user

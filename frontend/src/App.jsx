@@ -62,6 +62,9 @@ export default function App() {
               <div key={i}>
                 <div className="message assistant-message">
                   <div className="assistant-reply">{m.text}</div>
+                  {m.responseTime && (
+                    <div className="response-time">{m.responseTime}s</div>
+                  )}
                 </div>
                 <div className="sep" />
               </div>
