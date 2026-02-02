@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react"
+import ReactMarkdown from "react-markdown"
 import Upload from "./Upload"
 
 // Main application component. Holds the global message list and renders
@@ -56,7 +57,9 @@ export default function App() {
             return (
               <div key={i}>
                 <div className="message assistant-message">
-                  <div className="assistant-reply">{m.text}</div>
+                  <div className="assistant-reply markdown-content">
+                    <ReactMarkdown>{m.text}</ReactMarkdown>
+                  </div>
                   {m.responseTime && (
                     <div className="response-time">{m.responseTime}s</div>
                   )}

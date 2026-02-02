@@ -601,6 +601,101 @@ Examples:
 
 ---
 
+### Feature 6: Employee Listing via Natural Language
+
+**Approach**:
+1. Detect list-type queries using keyword matching
+2. Query PostgreSQL for all employee records
+3. Dynamically detect which fields user wants to see
+4. Format response with requested fields only
+
+**Implementation**:
+```python
+# Detect list queries
+list_keywords = ["show", "list", "display", "get", "fetch", "all", "every", "records"]
+employee_list_keywords = ["employees", "employee records", "all employees", "everyone"]
+
+is_list_query = (
+    any(kw in prompt_lower for kw in list_keywords) and
+    any(kw in prompt_lower for kw in employee_list_keywords)
+)
+
+if is_list_query:
+    # Determine which fields user wants
+    want_email = any(w in prompt_lower for w in ["email", "emails", "mail"])
+    want_phone = any(w in prompt_lower for w in ["phone", "contact", "number"])
+    want_skills = any(w in prompt_lower for w in ["skill", "skills", "technical"])
+
+    # Build response with only requested fields
+    for emp in employees:
+        line_parts = [f"• **{emp.name}** (ID: {emp.employee_id})"]
+        if want_email:
+            line_parts.append(f"  Email: {emp.email or 'N/A'}")
+        # ...
+```
+
+**Example Queries**:
+- "Show all employees" → Lists names and IDs
+- "List all employee emails" → Lists names, IDs, and emails
+- "Display everyone's skills" → Lists names, IDs, and technical skills
+
+---
+
+### Feature 7: Auto-Scroll Chat Container
+
+**Approach**:
+1. Attach ref to chat container
+2. Use `useEffect` to detect message changes
+3. Smooth-scroll to bottom with small delay for DOM updates
+
+**Implementation**:
+```javascript
+const chatRef = useRef(null)
+
+function scrollToBottom() {
+  const el = chatRef.current
+  if (!el) return
+  el.scrollTo({ top: el.scrollHeight, behavior: "smooth" })
+}
+
+useEffect(() => {
+  const t = setTimeout(() => scrollToBottom(), 100)
+  return () => clearTimeout(t)
+}, [messages])
+```
+
+**Why 100ms Delay**: Allows React to complete DOM updates and render new messages before calculating scroll position.
+
+---
+
+### Feature 8: Full Request Duration Timer
+
+**Approach**:
+1. Start timer at the moment user clicks Send
+2. Include file upload, LLM processing, and chat response time
+3. Display total duration in response message
+
+**Implementation**:
+```javascript
+const requestStartTimeRef = useRef(null)
+
+async function handleChat(e) {
+  // Start timing immediately
+  requestStartTimeRef.current = Date.now()
+
+  // ... file upload (included in timing) ...
+  // ... chat request (included in timing) ...
+
+  // Calculate total time
+  const responseTime = ((Date.now() - requestStartTimeRef.current) / 1000).toFixed(2)
+  onNewMessage({ type: "assistant", text: reply, responseTime })
+}
+```
+
+**Why useRef**: Timer value needs to persist across async operations without causing re-renders.
+
+---
+
 ## 5. Workarounds & Tricks Used
 
 ### Trick 1: JSON Extraction Retry
@@ -726,6 +821,130 @@ async def upload(file: UploadFile):
 
 ---
 
+### Trick 9: Keyword-Based Intent Detection for List Queries
+
+Instead of sending every query to the LLM, detect simple list queries with keyword matching:
+
+```python
+# Fast keyword detection - no LLM call needed
+list_keywords = ["show", "list", "display", "get", "fetch", "all"]
+employee_keywords = ["employees", "employee records", "everyone", "all people"]
+
+is_list_query = (
+    any(kw in prompt_lower for kw in list_keywords) and
+    any(kw in prompt_lower for kw in employee_keywords)
+)
+
+if is_list_query:
+    # Direct database query - much faster than LLM
+    employees = db.query(Employee).all()
+    return format_employee_list(employees)
+```
+
+**Benefits**:
+- Instant response (no LLM latency)
+- Deterministic behavior
+- Lower resource usage
+
+---
+
+### Trick 10: Dynamic Field Detection in Queries
+
+Detect which fields user wants from their query and only show those:
+
+```python
+# Parse user intent from keywords
+want_email = any(w in prompt for w in ["email", "mail", "contact"])
+want_phone = any(w in prompt for w in ["phone", "number", "mobile"])
+want_skills = any(w in prompt for w in ["skill", "technical", "expertise"])
+
+# Show all fields if none specifically requested
+show_all = not any([want_email, want_phone, want_skills])
+
+# Build response with only requested fields
+for emp in employees:
+    response += f"• {emp.name}"
+    if show_all or want_email:
+        response += f"\n  Email: {emp.email}"
+    if show_all or want_phone:
+        response += f"\n  Phone: {emp.phone}"
+```
+
+**Example**:
+- "Show all employees" → Names + all fields
+- "List employee emails" → Names + emails only
+- "Who has Python skills?" → Names + skills only
+
+---
+
+### Trick 11: CSS Viewport Units for Responsive Padding
+
+Use viewport height units (`vh`) instead of pixels for bottom padding to maintain proportional spacing across screen sizes:
+
+```css
+/* Before: Fixed pixel padding */
+.upload {
+  padding: 16px 24px 32px;  /* Looks different on different screens */
+}
+
+/* After: Viewport-relative padding */
+.upload {
+  padding: 16px 24px 7vh;  /* 7% of viewport height */
+}
+```
+
+**Why**: A 32px bottom margin looks tiny on a 4K display but takes significant space on a laptop. Using `vh` units ensures consistent proportional spacing.
+
+---
+
+### Trick 12: useRef for Cross-Async Timer State
+
+When tracking time across multiple async operations, `useRef` is better than `useState`:
+
+```javascript
+// Problem with useState: value captured at function start
+const [startTime, setStartTime] = useState(null)
+async function handleChat() {
+  setStartTime(Date.now())  // Updates for next render
+  await longOperation()
+  console.log(Date.now() - startTime)  // startTime is still old value!
+}
+
+// Solution with useRef: always current value
+const startTimeRef = useRef(null)
+async function handleChat() {
+  startTimeRef.current = Date.now()  // Immediate update
+  await longOperation()
+  console.log(Date.now() - startTimeRef.current)  // Correct!
+}
+```
+
+**Key Insight**: `useState` captures values at render time; `useRef` provides a mutable reference that always holds the current value.
+
+---
+
+### Trick 13: Smooth Scroll with Delayed Execution
+
+When scrolling to new content, add a small delay to ensure DOM has updated:
+
+```javascript
+useEffect(() => {
+  // Wait for DOM to settle before scrolling
+  const timer = setTimeout(() => {
+    element.scrollTo({ top: element.scrollHeight, behavior: "smooth" })
+  }, 100)
+
+  return () => clearTimeout(timer)  // Cleanup on unmount
+}, [messages])
+```
+
+**Why 100ms**: React batches updates and may not have rendered new messages immediately. The delay ensures:
+1. React has committed the DOM update
+2. Browser has laid out the new content
+3. `scrollHeight` reflects the actual content height
+
+---
+
 ## 6. Limitations & Known Issues
 
 ### Performance Limitations
@@ -756,6 +975,174 @@ async def upload(file: UploadFile):
 1. **Large PDFs may timeout**: No chunking for very large documents
 2. **Some resume formats fail**: Complex multi-column layouts confuse pdfplumber
 3. **Race condition on concurrent uploads**: Two simultaneous uploads could still potentially generate the same employee_id (edge case)
+
+---
+
+### Error #16: Response Time Not Including PDF Processing Duration
+
+**Symptom**: When uploading a PDF and getting a response, the response time only showed the chat request duration, not the entire wait time from pressing Send.
+
+**Root Cause**: The timer (`requestStartTimeRef.current`) was being set inside the chat portion of `handleChat`, after the file upload had already completed.
+
+```javascript
+// Before: Timer started after file upload
+if (hasFile) {
+  const newEmployeeId = await uploadAndWait(currentFile)  // Long wait here
+}
+if (currentPrompt) {
+  requestStartTimeRef.current = Date.now()  // Timer starts AFTER upload!
+  // ...
+}
+```
+
+**Solution**: Move the timer initialization to the very beginning of `handleChat`, before any async operations.
+
+```javascript
+// After: Timer starts at the beginning
+async function handleChat(e) {
+  e.preventDefault()
+  // ... validation ...
+
+  // Start timing from when user hits Send - captures entire request duration
+  requestStartTimeRef.current = Date.now()
+
+  try {
+    if (hasFile) {
+      const newEmployeeId = await uploadAndWait(currentFile)
+      // For file-only uploads, calculate total time here
+      if (!currentPrompt && newEmployeeId) {
+        const totalTime = ((Date.now() - requestStartTimeRef.current) / 1000).toFixed(2)
+        onNewMessage({
+          type: "assistant",
+          text: `Resume processed successfully!`,
+          responseTime: totalTime
+        })
+      }
+    }
+    // ...
+  }
+}
+```
+
+---
+
+### Error #17: Message Container Not Positioned Above Input Box
+
+**Symptom**: Chat messages and input box layout was incorrect; messages didn't properly fill the space above the fixed input area.
+
+**Root Cause**: The CSS layout wasn't using proper flexbox structure to position the chat area and input box correctly.
+
+**Solution**: Updated CSS to use flexbox column layout with proper flex properties.
+
+```css
+/* Before: No flex structure */
+.container { /* basic styling */ }
+.chat { /* overflow-y: auto */ }
+.upload { /* basic styling */ }
+
+/* After: Proper flex layout */
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat {
+  flex: 1;              /* Takes remaining space */
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.upload {
+  flex-shrink: 0;       /* Doesn't shrink */
+  padding: 16px 24px 7vh;
+  z-index: 10;
+}
+```
+
+---
+
+### Error #18: Chat Not Auto-Scrolling to Latest Message
+
+**Symptom**: When user submitted a prompt or received a response, they had to manually scroll down to see the latest message.
+
+**Root Cause**: No auto-scroll functionality was implemented to scroll to the bottom when new messages were added.
+
+**Solution**: Added `useEffect` hook that triggers scroll when messages change, with a small delay to allow DOM updates.
+
+```javascript
+// In App.jsx
+const chatRef = useRef(null)
+
+// Smooth-scroll to absolute bottom
+function scrollToBottom() {
+  const el = chatRef.current
+  if (!el) return
+  try {
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" })
+  } catch (err) {
+    el.scrollTop = el.scrollHeight  // Fallback
+  }
+}
+
+// Trigger scroll when messages change
+useEffect(() => {
+  if (!chatRef.current) return
+  const t = setTimeout(() => scrollToBottom(), 100)
+  return () => clearTimeout(t)
+}, [messages])
+
+return (
+  <div className="container">
+    <div className="chat" ref={chatRef}>
+      {/* messages */}
+    </div>
+  </div>
+)
+```
+
+**Note**: The 100ms delay ensures DOM has updated before calculating scroll position.
+
+---
+
+### Error #19: Response Time Display Styling Inconsistent
+
+**Symptom**: Response time was displayed but didn't match the desired UI (right-aligned with separator line).
+
+**Root Cause**: Missing CSS styling for the response time element.
+
+**Solution**: Added dedicated CSS class with right alignment and top border separator.
+
+```css
+/* Response time styling - right aligned with separator */
+.response-time {
+  font-size: 11px;
+  color: #888;
+  text-align: right;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #eee;
+}
+```
+
+```jsx
+// In App.jsx - assistant message rendering
+{m.type === "assistant" && (
+  <div className="message assistant-message">
+    <div className="assistant-reply">{m.text}</div>
+    {m.responseTime && (
+      <div className="response-time">{m.responseTime}s</div>
+    )}
+  </div>
+)}
+```
 
 ---
 
@@ -850,7 +1237,7 @@ DATABASE_URL=postgresql://user:pass@localhost/ems
 ---
 
 *Report generated for EMS 2.0 project documentation.*
-*Last updated: February 1, 2026*
+*Last updated: February 2, 2026*
 
 ---
 
@@ -858,5 +1245,6 @@ DATABASE_URL=postgresql://user:pass@localhost/ems
 
 | Date | Changes |
 |------|---------|
+| Feb 2, 2026 | Added Errors #16-19: Response time not including PDF processing, message container positioning, auto-scroll missing, response time styling. Added Features #6-8: Employee listing, auto-scroll, full request timer. Added Tricks #9-13: Keyword intent detection, dynamic field detection, CSS viewport units, useRef for async timers, smooth scroll with delay. |
 | Feb 1, 2026 | Added Errors #10-15: Variable shadowing, duplicate ID, Pydantic validation, multiple upload, BackgroundTasks, job status. Added Tricks #6-8. Updated Known Bugs. |
 | Initial | Errors #1-9, Features #1-5, Tricks #1-5 documented |
