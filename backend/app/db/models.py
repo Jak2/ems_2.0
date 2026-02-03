@@ -40,19 +40,11 @@ class Employee(Base):
 
     # Skills (JSON/TEXT - arrays)
     technical_skills = Column(Text, nullable=True)     # JSON array
-    soft_skills = Column(Text, nullable=True)          # JSON array
     languages = Column(Text, nullable=True)            # JSON array
 
     # Additional Information
-    certifications = Column(Text, nullable=True)       # JSON array
-    achievements = Column(Text, nullable=True)         # JSON array
     hobbies = Column(Text, nullable=True)              # JSON array
     cocurricular_activities = Column(Text, nullable=True)  # JSON array
-
-    # Location
-    address = Column(Text, nullable=True)
-    city = Column(String(128), nullable=True)
-    country = Column(String(128), nullable=True)
 
     # Original CV data
     raw_text = Column(Text, nullable=True)

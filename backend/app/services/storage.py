@@ -5,6 +5,16 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 from bson.objectid import ObjectId
 
+
+class MongoJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles MongoDB ObjectId and datetime objects."""
+    def default(self, obj):
+        if isinstance(obj, ObjectId):
+            return str(obj)
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
 try:
     from pymongo import MongoClient
     import gridfs
@@ -120,7 +130,7 @@ class Storage:
         json_path = os.path.join(self.json_dir, json_filename)
         try:
             with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(document, f, indent=2, ensure_ascii=False)
+                json.dump(document, f, indent=2, ensure_ascii=False, cls=MongoJSONEncoder)
             self.logger.info(f"Saved extracted data to JSON file: {json_path}")
         except Exception as e:
             self.logger.exception(f"Failed to save JSON file: {e}")

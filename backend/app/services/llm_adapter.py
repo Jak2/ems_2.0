@@ -11,45 +11,73 @@ class OllamaAdapter:
 
     This assumes you have `ollama` available on PATH and the model name (e.g. qwen-2.5).
     It wraps calls so you can swap implementation later.
+
+    Enterprise-level features:
+    - Temperature=0 for deterministic, consistent outputs
+    - Configurable parameters via environment variables
+    - Automatic retry with the HTTP API
     """
 
-    def __init__(self, model: Optional[str] = None):
+    def __init__(self, model: Optional[str] = None, temperature: float = 0.0):
         # Default to a common Ollama model name; you can override with OLLAMA_MODEL env var.
         self.model = model or os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+        # Temperature=0 ensures deterministic outputs for consistent extraction
+        self.temperature = float(os.getenv("OLLAMA_TEMPERATURE", str(temperature)))
         # quick check for ollama CLI availability; not fatal because HTTP API may be available
         self._ollama_path = shutil.which("ollama")
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, temperature: Optional[float] = None) -> str:
         """Generate text using Ollama.
 
-        First try the local Ollama HTTP API at localhost:11434 (if the Ollama app is running).
-        If that fails, fall back to the `ollama` CLI. Provide clearer errors for troubleshooting.
+        ALWAYS tries the HTTP API first (supports temperature=0 for consistent results).
+        Falls back to CLI only if HTTP API is unavailable.
 
-        NOTE: No timeout is set - LLM generation can take a long time depending on hardware.
+        Args:
+            prompt: The prompt to send to the model
+            temperature: Override temperature for this call (default: use instance setting)
+
+        NOTE: Uses temperature=0 by default for consistent, deterministic outputs.
         """
-        # 1) Try HTTP API only if OLLAMA_API_URL is explicitly set
-        http_error = None
-        api_url = os.getenv("OLLAMA_API_URL")
-        if api_url:
-            try:
-                payload = {"model": self.model, "prompt": prompt, "stream": False}
-                resp = requests.post(api_url, json=payload, timeout=600)  # 10 min max for HTTP
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # Ollama API returns response in 'response' key
-                    # Also check other common keys for compatibility
-                    for k in ("response", "text", "output", "result"):
-                        if k in data and data[k]:
-                            return data[k].strip()
-                    if isinstance(data, dict) and "data" in data:
-                        return str(data["data"]).strip()
-                    return str(data).strip()
-                else:
-                    http_error = RuntimeError(f"Ollama HTTP API returned status {resp.status_code}: {resp.text}")
-            except requests.exceptions.RequestException as e:
-                http_error = e
+        temp = temperature if temperature is not None else self.temperature
 
-        # 2) Fallback to CLI if available
+        # 1) ALWAYS try HTTP API first - it supports temperature=0 for consistent results
+        # Default to localhost:11434 (standard Ollama port) if not explicitly set
+        http_error = None
+        api_url = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
+
+        try:
+            payload = {
+                "model": self.model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": temp,
+                    "num_predict": 4096,  # Allow longer outputs for complete extraction
+                    "seed": 42,  # Fixed seed for reproducibility
+                }
+            }
+            resp = requests.post(api_url, json=payload, timeout=600)  # 10 min max for HTTP
+            if resp.status_code == 200:
+                data = resp.json()
+                # Ollama API returns response in 'response' key
+                # Also check other common keys for compatibility
+                for k in ("response", "text", "output", "result"):
+                    if k in data and data[k]:
+                        return data[k].strip()
+                if isinstance(data, dict) and "data" in data:
+                    return str(data["data"]).strip()
+                return str(data).strip()
+            else:
+                http_error = RuntimeError(f"Ollama HTTP API returned status {resp.status_code}: {resp.text}")
+        except requests.exceptions.RequestException as e:
+            http_error = e
+
+        # 2) Fallback to CLI if HTTP API failed
+        # WARNING: CLI doesn't support temperature=0, results may be inconsistent!
+        import logging
+        logger = logging.getLogger("cv-chat")
+        logger.warning(f"[LLM] HTTP API failed ({http_error}), falling back to CLI. Results may be inconsistent!")
+
         if not self._ollama_path:
             # If HTTP was attempted, include that error for debugging
             if http_error:
@@ -66,8 +94,10 @@ class OllamaAdapter:
         cmd = [self._ollama_path, "run", self.model, prompt]
         try:
             # Capture raw bytes (text=False) and decode explicitly with utf-8
-            # No timeout - let the LLM take as long as needed
-            proc = subprocess.run(cmd, capture_output=True, text=False)
+            # Timeout of 5 minutes (300 seconds) to prevent infinite hangs
+            proc = subprocess.run(cmd, capture_output=True, text=False, timeout=300)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Ollama CLI timed out after 5 minutes. The prompt may be too long or the model is overloaded. Try again or use a smaller model.")
         except FileNotFoundError:
             raise RuntimeError("'ollama' CLI not found on PATH. Make sure Ollama is installed and available.")
 

@@ -16,6 +16,39 @@ from app.services.extractor import extract_text_from_bytes
 from app.services.llm_adapter import OllamaAdapter
 from app.services.embeddings import Embeddings
 from app.services.vectorstore_faiss import FaissVectorStore
+from app.services.extraction_utils import (
+    array_to_text,
+    create_extraction_prompt,
+    create_retry_prompt,
+    validate_extraction,
+    parse_llm_json,
+    extract_skills_from_text,
+    quick_verify_extraction,
+    create_ensemble_prompts,
+    merge_ensemble_results,
+    get_ensemble_temperatures
+)
+from app.services.validators import (
+    sanitize_input,
+    validate_input_length,
+    enforce_schema,
+    validate_and_clean_extraction
+)
+from app.services.search_utils import (
+    expand_skill_search,
+    skills_match,
+    calculate_experience_years,
+    find_employees_by_experience,
+    expand_city_search,
+    get_title_seniority,
+    parse_negative_search,
+    apply_negative_filter,
+    find_employees_in_date_range,
+    parse_date_flexible,
+    SKILL_SYNONYMS,
+    CITY_SYNONYMS,
+    TITLE_SENIORITY
+)
 from app.db.session import SessionLocal, engine
 from app.db import models
 
@@ -237,6 +270,13 @@ def process_cv(file_id: str, filename: str, job_id: str):
     pdf_text = extract_text_from_bytes(data)
     logger.info(f"[PROCESS_CV] ✓ Extracted {len(pdf_text)} characters from PDF")
 
+    # Log first 500 chars for debugging - helps verify extraction quality
+    if pdf_text:
+        preview = pdf_text[:500].replace('\n', '\\n')
+        logger.info(f"[PROCESS_CV] → Extracted text preview: {preview}")
+    else:
+        logger.warning(f"[PROCESS_CV] ✗ PDF text extraction returned empty! File may be image-based or corrupted.")
+
     # log the raw extracted text excerpt for debugging
     try:
         with open(os.path.join(JOB_DIR, f"{job_id}.extracted.txt"), "w", encoding="utf-8") as ef:
@@ -250,6 +290,25 @@ def process_cv(file_id: str, filename: str, job_id: str):
             mf.write(f"extracted_len={len(pdf_text)}")
     except Exception:
         pass
+    # =====================================================
+    # INPUT VALIDATION & SANITIZATION
+    # =====================================================
+    logger.info(f"[PROCESS_CV] → Validating and sanitizing input...")
+
+    # Sanitize input to prevent injection attacks
+    pdf_text = sanitize_input(pdf_text)
+
+    # Validate input length
+    length_result = validate_input_length(pdf_text, "resume_text")
+    if not length_result.is_valid:
+        logger.error(f"[PROCESS_CV] ✗ Input validation failed: {length_result.errors}")
+        # Continue with whatever we have, but log the warning
+    if length_result.warnings:
+        logger.warning(f"[PROCESS_CV] ⚠ Input warnings: {length_result.warnings}")
+    pdf_text = length_result.value or pdf_text
+
+    logger.info(f"[PROCESS_CV] ✓ Input validated and sanitized")
+
     # Store employee into SQL DB with auto-generated employeeID
     from sqlalchemy.orm import Session
     import json as _json
@@ -333,75 +392,12 @@ def process_cv(file_id: str, filename: str, job_id: str):
                     pass
         except Exception:
             pass
-        # LLM-driven COMPREHENSIVE structured extraction with intelligent parsing
-        logger.info(f"[PROCESS_CV] → Starting LLM extraction...")
+        # LLM-driven COMPREHENSIVE structured extraction with enterprise-level prompts
+        logger.info(f"[PROCESS_CV] → Starting LLM extraction with enterprise prompt wrapper...")
         try:
-            extraction_prompt = (
-                "You are an expert resume parser with deep analytical capabilities. Your task is to thoroughly analyze the ENTIRE resume and extract ALL information into JSON format.\n\n"
-                "CRITICAL INSTRUCTIONS:\n"
-                "1. READ THE ENTIRE RESUME CAREFULLY - information may be scattered across different sections\n"
-                "2. AGGREGATE SKILLS FROM EVERYWHERE - collect technical skills mentioned in:\n"
-                "   - Dedicated skills sections\n"
-                "   - Work experience descriptions (e.g., 'worked with Python and AWS')\n"
-                "   - Project descriptions\n"
-                "   - Certifications (e.g., 'AWS Certified' implies AWS skill)\n"
-                "   - Education (e.g., 'coursework in Machine Learning')\n"
-                "   - Summary/objective sections\n"
-                "   List EVERY unique skill you find - do not limit the count!\n\n"
-                "3. CALCULATE TOTAL EXPERIENCE:\n"
-                "   - If total experience is explicitly stated, use that value\n"
-                "   - If NOT explicitly stated, CALCULATE it by adding up all work durations\n"
-                "   - Example: 'Jan 2020 - Dec 2022' = ~3 years, 'Feb 2018 - Dec 2019' = ~2 years, Total = ~5 years\n"
-                "   - Include this in the 'summary' field as 'Total Experience: X years Y months'\n\n"
-                "4. INFER DEPARTMENT from job titles/roles:\n"
-                "   - 'Software Engineer', 'Developer', 'QA' -> 'Engineering/IT'\n"
-                "   - 'Scrum Master', 'Project Manager' -> 'Project Management'\n"
-                "   - 'HR Manager', 'Recruiter' -> 'Human Resources'\n\n"
-                "5. EXTRACT POSITION as the most recent/current job title\n\n"
-                "6. Return ONLY valid JSON - no explanations before or after\n"
-                "7. Use null for fields with no information found\n"
-                "8. For arrays, include ALL items found - do not truncate or limit\n\n"
-                "Required JSON structure:\n"
-                "{\n"
-                '  "name": "Full name",\n'
-                '  "email": "email@example.com",\n'
-                '  "phone": "+1-234-567-8900",\n'
-                '  "linkedin_url": "LinkedIn profile URL or null",\n'
-                '  "portfolio_url": "Portfolio/website URL or null",\n'
-                '  "github_url": "GitHub profile URL or null",\n'
-                '  "department": "Inferred department based on role",\n'
-                '  "position": "Most recent/current job title",\n'
-                '  "career_objective": "Career objective if stated",\n'
-                '  "summary": "Professional summary INCLUDING calculated total experience (e.g., Total Experience: 12 years 4 months)",\n'
-                '  "work_experience": [\n'
-                '    {"company": "Company Name", "role": "Job Title", "duration": "Start - End", "duration_months": 24, "responsibilities": "Key responsibilities..."}\n'
-                '  ],\n'
-                '  "education": [\n'
-                '    {"degree": "Degree Name", "field": "Field of Study", "institution": "University Name", "year": "Graduation Year", "grade": "GPA/Percentage"}\n'
-                '  ],\n'
-                '  "technical_skills": ["EVERY technical skill found ANYWHERE in the resume - tools, technologies, programming languages, frameworks, platforms, methodologies like Agile/Scrum, testing tools, etc."],\n'
-                '  "soft_skills": ["Leadership", "Communication", "Team Management", "Problem Solving", etc.],\n'
-                '  "languages": ["English (Proficiency)", "Spanish (Level)", etc.],\n'
-                '  "certifications": ["Full certification name with year if available"],\n'
-                '  "achievements": ["All achievements, awards, recognitions mentioned"],\n'
-                '  "hobbies": ["Hobbies and interests if mentioned"],\n'
-                '  "cocurricular_activities": ["Extracurricular activities, volunteering, clubs"],\n'
-                '  "address": "Full address if provided",\n'
-                '  "city": "City name",\n'
-                '  "country": "Country name"\n'
-                "}\n\n"
-                "IMPORTANT: For technical_skills, scan the ENTIRE resume and list EVERY skill including:\n"
-                "- Programming languages (Python, Java, C++, etc.)\n"
-                "- Frameworks (React, Angular, Django, etc.)\n"
-                "- Tools (Jira, Selenium, Jenkins, Git, etc.)\n"
-                "- Cloud platforms (AWS, Azure, GCP)\n"
-                "- Databases (MySQL, MongoDB, PostgreSQL)\n"
-                "- Methodologies (Agile, Scrum, DevOps, CI/CD)\n"
-                "- Testing tools and frameworks\n"
-                "- Any other technical competency mentioned\n\n"
-                f"Resume text:\n\n{pdf_text[:12000]}\n\n"
-                "JSON output:"
-            )
+            # Use the enterprise-level extraction prompt
+            extraction_prompt = create_extraction_prompt(pdf_text, max_chars=10000)
+
             # write prompt log for this job
             try:
                 with open(os.path.join(JOB_DIR, f"{job_id}.prompt.txt"), "w", encoding="utf-8") as pf:
@@ -413,29 +409,36 @@ def process_cv(file_id: str, filename: str, job_id: str):
             extraction_resp = llm.generate(extraction_prompt)
             logger.info(f"[PROCESS_CV] ✓ LLM response received: {len(extraction_resp)} chars")
             logger.info(f"[PROCESS_CV] → LLM response preview: {extraction_resp[:300]}...")
-            # attempt to parse JSON from the response
+
+            # Use robust JSON parsing with multiple fallback strategies
+            # Pass pdf_text for fallback extraction (email, phone, soft skills)
             import json as _json
 
-            parsed = None
-            try:
-                parsed = _json.loads(extraction_resp)
-                logger.info(f"[PROCESS_CV] ✓ JSON parsed directly from LLM response")
-            except Exception as e:
-                logger.warning(f"[PROCESS_CV] ✗ Direct JSON parse failed: {e}")
-                # try to extract JSON substring
-                import re
+            parsed = parse_llm_json(extraction_resp, raw_text=pdf_text)
+            if parsed:
+                logger.info(f"[PROCESS_CV] ✓ JSON parsed successfully")
 
-                m = re.search(r"\{.*\}", extraction_resp, re.S)
-                if m:
-                    logger.info(f"[PROCESS_CV] → Found JSON substring in response, attempting parse...")
-                    try:
-                        parsed = _json.loads(m.group(0))
-                        logger.info(f"[PROCESS_CV] ✓ JSON extracted from substring")
-                    except Exception as e2:
-                        logger.error(f"[PROCESS_CV] ✗ JSON substring parse also failed: {e2}")
-                        parsed = None
-                else:
-                    logger.error(f"[PROCESS_CV] ✗ No JSON found in LLM response!")
+                # Quick verification against original text (reduces hallucination)
+                parsed = quick_verify_extraction(parsed, pdf_text)
+                logger.info(f"[PROCESS_CV] ✓ Quick verification completed")
+
+                # Validate extraction quality
+                is_valid, issues = validate_extraction(parsed)
+                if not is_valid:
+                    logger.warning(f"[PROCESS_CV] ⚠ Extraction validation issues: {issues}")
+
+                # Enterprise validation with schema enforcement
+                validation_result = validate_and_clean_extraction(parsed, pdf_text)
+                if validation_result.validation_errors:
+                    logger.warning(f"[PROCESS_CV] ⚠ Schema validation errors: {validation_result.validation_errors}")
+                if validation_result.validation_warnings:
+                    logger.info(f"[PROCESS_CV] → Schema warnings: {validation_result.validation_warnings}")
+                logger.info(f"[PROCESS_CV] → Extraction confidence: {validation_result.overall_confidence:.2f}")
+
+                # Use the validated data
+                parsed = validation_result.data
+            else:
+                logger.error(f"[PROCESS_CV] ✗ JSON parsing failed with all strategies - extraction will be incomplete")
 
             # Log parsed content
             if parsed:
@@ -474,18 +477,15 @@ def process_cv(file_id: str, filename: str, job_id: str):
 
                 # Skills (arrays) - Accept strings or dicts
                 technical_skills: List[Any] | None = None
-                soft_skills: List[Any] | None = None
                 languages: List[Any] | None = None
 
                 # Additional (arrays) - Accept strings or dicts
-                certifications: List[Any] | None = None
-                achievements: List[Any] | None = None
                 hobbies: List[Any] | None = None
                 cocurricular_activities: List[Any] | None = None
 
                 # Convert dict items to JSON strings for storage
-                @field_validator('work_experience', 'education', 'technical_skills', 'soft_skills',
-                               'languages', 'certifications', 'achievements', 'hobbies',
+                @field_validator('work_experience', 'education', 'technical_skills',
+                               'languages', 'hobbies',
                                'cocurricular_activities', mode='before')
                 @classmethod
                 def convert_dicts_to_strings(cls, v):
@@ -501,11 +501,6 @@ def process_cv(file_id: str, filename: str, job_id: str):
                                 result.append(str(item) if item is not None else None)
                         return result
                     return v
-
-                # Location
-                address: str | None = None
-                city: str | None = None
-                country: str | None = None
 
             parsed_model = None
             if isinstance(parsed, dict):
@@ -524,21 +519,9 @@ def process_cv(file_id: str, filename: str, job_id: str):
             if not parsed_model or not parsed_model.name:
                 logger.warning(f"[PROCESS_CV] → Name not found in first extraction, trying retry prompt...")
                 try:
-                    retry_prompt = (
-                        "CRITICAL: Extract resume data as STRICT JSON only. NO explanations.\n\n"
-                        "IMPORTANT RULES:\n"
-                        "1. Find the person's NAME - look at the top of the resume\n"
-                        "2. AGGREGATE ALL SKILLS from everywhere in the resume (work experience, projects, certifications)\n"
-                        "3. CALCULATE total experience by adding up all job durations if not explicitly stated\n"
-                        "4. Include calculated experience in 'summary' as 'Total Experience: X years Y months'\n\n"
-                        "Return JSON with these keys (use null if not found):\n"
-                        "name, email, phone, linkedin_url, portfolio_url, github_url, department, position, "
-                        "career_objective, summary, work_experience, education, technical_skills (LIST ALL SKILLS!), soft_skills, "
-                        "languages, certifications, achievements, hobbies, cocurricular_activities, address, city, country\n\n"
-                        "Arrays must use JSON array format: [\"item1\", \"item2\"]\n"
-                        "For technical_skills, include EVERY skill mentioned anywhere: programming languages, tools, frameworks, platforms, methodologies.\n\n"
-                        f"Resume:\n\n{pdf_text[:12000]}\n\nJSON:"
-                    )
+                    # Use the enterprise retry prompt
+                    retry_prompt = create_retry_prompt(pdf_text, max_chars=8000)
+
                     # write retry prompt log
                     try:
                         with open(os.path.join(JOB_DIR, f"{job_id}.prompt.retry.txt"), "w", encoding="utf-8") as pf:
@@ -548,19 +531,17 @@ def process_cv(file_id: str, filename: str, job_id: str):
                     logger.info(f"[PROCESS_CV] → Sending retry prompt to LLM...")
                     retry_resp = llm.generate(retry_prompt)
                     logger.info(f"[PROCESS_CV] ✓ Retry response received: {len(retry_resp)} chars")
-                    parsed2 = None
-                    try:
-                        parsed2 = _json.loads(retry_resp)
-                    except Exception:
-                        m2 = re.search(r"\{.*\}", retry_resp, re.S)
-                        if m2:
-                            try:
-                                parsed2 = _json.loads(m2.group(0))
-                            except Exception:
-                                parsed2 = None
+
+                    # Use robust JSON parsing with fallback extraction
+                    parsed2 = parse_llm_json(retry_resp, raw_text=pdf_text)
                     if isinstance(parsed2, dict):
+                        # OUTPUT VERIFICATION for retry extraction
+                        parsed2 = quick_verify_extraction(parsed2, pdf_text)
+                        validation_result = validate_and_clean_extraction(parsed2, pdf_text)
+                        parsed2 = validation_result.data
                         try:
                             parsed_model = ComprehensiveExtractionModel(**parsed2)
+                            logger.info(f"[PROCESS_CV] ✓ Retry extraction successful: name='{parsed_model.name}'")
                         except ValidationError as ve:
                             logger.warning(f"Retry validation error: {ve}")
                             parsed_model = None
@@ -575,15 +556,16 @@ def process_cv(file_id: str, filename: str, job_id: str):
                 logger.info(f"[PROCESS_CV] → Final extracted phone: '{parsed_model.phone}'")
                 logger.info(f"[PROCESS_CV] → Final extracted position: '{parsed_model.position}'")
 
-                # Helper function to safely set attributes and convert arrays to JSON
+                # Helper function to safely set attributes and convert arrays to readable text
                 def safe_set(obj, attr, value):
                     if value is not None:
                         try:
-                            # Convert lists to JSON string for TEXT columns
+                            # Convert lists to readable text format (not JSON)
                             if isinstance(value, list):
-                                value = _json.dumps(value, ensure_ascii=False)
-                            setattr(obj, attr, value)
-                            logger.info(f"[PROCESS_CV] → Set {attr} = '{str(value)[:50]}{'...' if len(str(value)) > 50 else ''}'")
+                                value = array_to_text(value)
+                            if value:  # Only set if we have a value after conversion
+                                setattr(obj, attr, value)
+                                logger.info(f"[PROCESS_CV] → Set {attr} = '{str(value)[:50]}{'...' if len(str(value)) > 50 else ''}'")
                         except Exception as e:
                             logger.warning(f"[PROCESS_CV] ✗ Could not set {attr}: {e}")
                     else:
@@ -611,19 +593,11 @@ def process_cv(file_id: str, filename: str, job_id: str):
 
                 # Set skills (arrays → JSON)
                 safe_set(emp, "technical_skills", parsed_model.technical_skills)
-                safe_set(emp, "soft_skills", parsed_model.soft_skills)
                 safe_set(emp, "languages", parsed_model.languages)
 
                 # Set additional info (arrays → JSON)
-                safe_set(emp, "certifications", parsed_model.certifications)
-                safe_set(emp, "achievements", parsed_model.achievements)
                 safe_set(emp, "hobbies", parsed_model.hobbies)
                 safe_set(emp, "cocurricular_activities", parsed_model.cocurricular_activities)
-
-                # Set location
-                safe_set(emp, "address", parsed_model.address)
-                safe_set(emp, "city", parsed_model.city)
-                safe_set(emp, "country", parsed_model.country)
 
                 db.add(emp)
                 db.commit()
@@ -646,15 +620,9 @@ def process_cv(file_id: str, filename: str, job_id: str):
                         "work_experience": parsed_model.work_experience,
                         "education": parsed_model.education,
                         "technical_skills": parsed_model.technical_skills,
-                        "soft_skills": parsed_model.soft_skills,
                         "languages": parsed_model.languages,
-                        "certifications": parsed_model.certifications,
-                        "achievements": parsed_model.achievements,
                         "hobbies": parsed_model.hobbies,
                         "cocurricular_activities": parsed_model.cocurricular_activities,
-                        "address": parsed_model.address,
-                        "city": parsed_model.city,
-                        "country": parsed_model.country,
                         "raw_text_preview": pdf_text[:1000] if pdf_text else None
                     }
                     doc_id = storage.save_extracted_data(emp.employee_id, filename, extracted_json)
@@ -743,8 +711,18 @@ async def chat(request: Request, req: ChatRequest | None = None):
         # If the content after "create" is substantial (>100 chars), treat as resume data
         if len(potential_resume) > 100:
             is_resume_create = True
-            resume_content = potential_resume
-            logger.info(f"[CHAT] → Detected RESUME CREATE command ({len(resume_content)} chars)")
+            # INPUT VALIDATION & SANITIZATION (Enterprise-level)
+            resume_content = sanitize_input(potential_resume)
+            length_result = validate_input_length(resume_content, "resume_text")
+            if not length_result.is_valid:
+                logger.warning(f"[CHAT] Input validation failed: {length_result.error}")
+                return {
+                    "reply": f"⚠️ Input validation failed: {length_result.error}",
+                    "session_id": session_id,
+                    "employee_id": None,
+                    "employee_name": None
+                }
+            logger.info(f"[CHAT] → Detected RESUME CREATE command ({len(resume_content)} chars, sanitized)")
 
     # Handle resume-based employee creation
     if is_resume_create:
@@ -803,93 +781,37 @@ async def chat(request: Request, req: ChatRequest | None = None):
             except Exception as e:
                 logger.warning(f"[CHAT] Failed to add to FAISS: {e}")
 
-            # Use comprehensive extraction prompt with intelligent parsing
-            extraction_prompt = (
-                "You are an expert resume parser with deep analytical capabilities. Your task is to thoroughly analyze the ENTIRE resume and extract ALL information into JSON format.\n\n"
-                "CRITICAL INSTRUCTIONS:\n"
-                "1. READ THE ENTIRE RESUME CAREFULLY - information may be scattered across different sections\n"
-                "2. AGGREGATE SKILLS FROM EVERYWHERE - collect technical skills mentioned in:\n"
-                "   - Dedicated skills sections\n"
-                "   - Work experience descriptions (e.g., 'worked with Python and AWS')\n"
-                "   - Project descriptions\n"
-                "   - Certifications (e.g., 'AWS Certified' implies AWS skill)\n"
-                "   - Education (e.g., 'coursework in Machine Learning')\n"
-                "   - Summary/objective sections\n"
-                "   List EVERY unique skill you find - do not limit the count!\n\n"
-                "3. CALCULATE TOTAL EXPERIENCE:\n"
-                "   - If total experience is explicitly stated, use that value\n"
-                "   - If NOT explicitly stated, CALCULATE it by adding up all work durations\n"
-                "   - Example: 'Jan 2020 - Dec 2022' = ~3 years, 'Feb 2018 - Dec 2019' = ~2 years, Total = ~5 years\n"
-                "   - Include this in the 'summary' field as 'Total Experience: X years Y months'\n\n"
-                "4. INFER DEPARTMENT from job titles/roles:\n"
-                "   - 'Software Engineer', 'Developer', 'QA' -> 'Engineering/IT'\n"
-                "   - 'Scrum Master', 'Project Manager' -> 'Project Management'\n"
-                "   - 'HR Manager', 'Recruiter' -> 'Human Resources'\n\n"
-                "5. EXTRACT POSITION as the most recent/current job title\n\n"
-                "6. Return ONLY valid JSON - no explanations before or after\n"
-                "7. Use null for fields with no information found\n"
-                "8. For arrays, include ALL items found - do not truncate or limit\n\n"
-                "Required JSON structure:\n"
-                "{\n"
-                '  "name": "Full name",\n'
-                '  "email": "email@example.com",\n'
-                '  "phone": "+1-234-567-8900",\n'
-                '  "linkedin_url": "LinkedIn profile URL or null",\n'
-                '  "portfolio_url": "Portfolio/website URL or null",\n'
-                '  "github_url": "GitHub profile URL or null",\n'
-                '  "department": "Inferred department based on role",\n'
-                '  "position": "Most recent/current job title",\n'
-                '  "career_objective": "Career objective if stated",\n'
-                '  "summary": "Professional summary INCLUDING calculated total experience (e.g., Total Experience: 12 years 4 months)",\n'
-                '  "work_experience": [\n'
-                '    {"company": "Company Name", "role": "Job Title", "duration": "Start - End", "duration_months": 24, "responsibilities": "Key responsibilities..."}\n'
-                '  ],\n'
-                '  "education": [\n'
-                '    {"degree": "Degree Name", "field": "Field of Study", "institution": "University Name", "year": "Graduation Year", "grade": "GPA/Percentage"}\n'
-                '  ],\n'
-                '  "technical_skills": ["EVERY technical skill found ANYWHERE in the resume - tools, technologies, programming languages, frameworks, platforms, methodologies like Agile/Scrum, testing tools, etc."],\n'
-                '  "soft_skills": ["Leadership", "Communication", "Team Management", "Problem Solving", etc.],\n'
-                '  "languages": ["English (Proficiency)", "Spanish (Level)", etc.],\n'
-                '  "certifications": ["Full certification name with year if available"],\n'
-                '  "achievements": ["All achievements, awards, recognitions mentioned"],\n'
-                '  "hobbies": ["Hobbies and interests if mentioned"],\n'
-                '  "cocurricular_activities": ["Extracurricular activities, volunteering, clubs"],\n'
-                '  "address": "Full address if provided",\n'
-                '  "city": "City name",\n'
-                '  "country": "Country name"\n'
-                "}\n\n"
-                "IMPORTANT: For technical_skills, scan the ENTIRE resume and list EVERY skill including:\n"
-                "- Programming languages (Python, Java, C++, etc.)\n"
-                "- Frameworks (React, Angular, Django, etc.)\n"
-                "- Tools (Jira, Selenium, Jenkins, Git, etc.)\n"
-                "- Cloud platforms (AWS, Azure, GCP)\n"
-                "- Databases (MySQL, MongoDB, PostgreSQL)\n"
-                "- Methodologies (Agile, Scrum, DevOps, CI/CD)\n"
-                "- Testing tools and frameworks\n"
-                "- Any other technical competency mentioned\n\n"
-                f"Resume text:\n\n{resume_content[:12000]}\n\n"
-                "JSON output:"
-            )
+            # Use enterprise-level extraction prompt for consistent results
+            extraction_prompt = create_extraction_prompt(resume_content, max_chars=10000)
 
             logger.info(f"[CHAT] → Sending extraction prompt to LLM ({len(extraction_prompt)} chars)...")
             extraction_resp = llm.generate(extraction_prompt)
             logger.info(f"[CHAT] ✓ LLM response received: {len(extraction_resp)} chars")
 
-            # Parse JSON from response
-            parsed = None
-            try:
-                parsed = _json.loads(extraction_resp)
-                logger.info(f"[CHAT] ✓ JSON parsed directly from LLM response")
-            except Exception as e:
-                logger.warning(f"[CHAT] ✗ Direct JSON parse failed: {e}")
-                m = re.search(r"\{.*\}", extraction_resp, re.S)
-                if m:
-                    try:
-                        parsed = _json.loads(m.group(0))
-                        logger.info(f"[CHAT] ✓ JSON extracted from substring")
-                    except Exception as e2:
-                        logger.error(f"[CHAT] ✗ JSON substring parse also failed: {e2}")
-                        parsed = None
+            # Parse JSON from response using robust parsing with fallback strategies
+            # Pass resume_content for fallback extraction (email, phone, soft skills)
+            parsed = parse_llm_json(extraction_resp, raw_text=resume_content)
+            if parsed:
+                logger.info(f"[CHAT] ✓ JSON parsed successfully")
+                # Validate extraction quality
+                is_valid, issues = validate_extraction(parsed)
+                if not is_valid:
+                    logger.warning(f"[CHAT] ⚠ Extraction validation issues: {issues}")
+
+                # OUTPUT VERIFICATION (Enterprise-level)
+                # 1. Chain-of-Verification for hallucination reduction
+                parsed = quick_verify_extraction(parsed, resume_content)
+                logger.info(f"[CHAT] ✓ Chain-of-Verification completed")
+
+                # 2. Schema enforcement and field validation
+                validation_result = validate_and_clean_extraction(parsed, resume_content)
+                parsed = validation_result.data
+                if validation_result.warnings:
+                    for w in validation_result.warnings:
+                        logger.warning(f"[CHAT] ⚠ Validation warning: {w}")
+                logger.info(f"[CHAT] ✓ Schema enforcement completed")
+            else:
+                logger.error(f"[CHAT] ✗ JSON parsing failed with all strategies")
 
             # Validate using Pydantic model
             from pydantic import BaseModel as PydanticBase, ValidationError, field_validator
@@ -909,18 +831,12 @@ async def chat(request: Request, req: ChatRequest | None = None):
                 work_experience: List[Any] | None = None
                 education: List[Any] | None = None
                 technical_skills: List[Any] | None = None
-                soft_skills: List[Any] | None = None
                 languages: List[Any] | None = None
-                certifications: List[Any] | None = None
-                achievements: List[Any] | None = None
                 hobbies: List[Any] | None = None
                 cocurricular_activities: List[Any] | None = None
-                address: str | None = None
-                city: str | None = None
-                country: str | None = None
 
-                @field_validator('work_experience', 'education', 'technical_skills', 'soft_skills',
-                               'languages', 'certifications', 'achievements', 'hobbies',
+                @field_validator('work_experience', 'education', 'technical_skills',
+                               'languages', 'hobbies',
                                'cocurricular_activities', mode='before')
                 @classmethod
                 def convert_dicts_to_strings(cls, v):
@@ -949,33 +865,17 @@ async def chat(request: Request, req: ChatRequest | None = None):
             if not parsed_model or not parsed_model.name:
                 logger.warning(f"[CHAT] → Name not found, trying retry prompt...")
                 try:
-                    retry_prompt = (
-                        "CRITICAL: Extract resume data as STRICT JSON only. NO explanations.\n\n"
-                        "IMPORTANT RULES:\n"
-                        "1. Find the person's NAME - look at the beginning of the text\n"
-                        "2. AGGREGATE ALL SKILLS from everywhere in the resume (work experience, projects, certifications)\n"
-                        "3. CALCULATE total experience by adding up all job durations if not explicitly stated\n"
-                        "4. Include calculated experience in 'summary' as 'Total Experience: X years Y months'\n\n"
-                        "Return JSON with these keys (use null if not found):\n"
-                        "name, email, phone, linkedin_url, portfolio_url, github_url, department, position, "
-                        "career_objective, summary, work_experience, education, technical_skills (LIST ALL SKILLS!), soft_skills, "
-                        "languages, certifications, achievements, hobbies, cocurricular_activities, address, city, country\n\n"
-                        "Arrays must use JSON array format: [\"item1\", \"item2\"]\n"
-                        "For technical_skills, include EVERY skill mentioned anywhere: programming languages, tools, frameworks, platforms, methodologies.\n\n"
-                        f"Resume:\n\n{resume_content[:12000]}\n\nJSON:"
-                    )
+                    # Use the enterprise retry prompt
+                    retry_prompt = create_retry_prompt(resume_content, max_chars=8000)
                     retry_resp = llm.generate(retry_prompt)
-                    parsed2 = None
-                    try:
-                        parsed2 = _json.loads(retry_resp)
-                    except Exception:
-                        m2 = re.search(r"\{.*\}", retry_resp, re.S)
-                        if m2:
-                            try:
-                                parsed2 = _json.loads(m2.group(0))
-                            except Exception:
-                                parsed2 = None
+
+                    # Use robust JSON parsing with fallback extraction
+                    parsed2 = parse_llm_json(retry_resp, raw_text=resume_content)
                     if isinstance(parsed2, dict):
+                        # OUTPUT VERIFICATION for retry extraction
+                        parsed2 = quick_verify_extraction(parsed2, resume_content)
+                        validation_result = validate_and_clean_extraction(parsed2, resume_content)
+                        parsed2 = validation_result.data
                         try:
                             parsed_model = ComprehensiveExtractionModel(**parsed2)
                             logger.info(f"[CHAT] ✓ Retry successful, name: '{parsed_model.name}'")
@@ -989,10 +889,12 @@ async def chat(request: Request, req: ChatRequest | None = None):
                 def safe_set(obj, attr, value):
                     if value is not None:
                         try:
+                            # Convert lists to readable text format (not JSON)
                             if isinstance(value, list):
-                                value = _json.dumps(value, ensure_ascii=False)
-                            setattr(obj, attr, value)
-                            logger.info(f"[CHAT] → Set {attr} = '{str(value)[:50]}{'...' if len(str(value)) > 50 else ''}'")
+                                value = array_to_text(value)
+                            if value:  # Only set if we have a value after conversion
+                                setattr(obj, attr, value)
+                                logger.info(f"[CHAT] → Set {attr} = '{str(value)[:50]}{'...' if len(str(value)) > 50 else ''}'")
                         except Exception as e:
                             logger.warning(f"[CHAT] ✗ Could not set {attr}: {e}")
 
@@ -1009,15 +911,9 @@ async def chat(request: Request, req: ChatRequest | None = None):
                 safe_set(emp, "work_experience", parsed_model.work_experience)
                 safe_set(emp, "education", parsed_model.education)
                 safe_set(emp, "technical_skills", parsed_model.technical_skills)
-                safe_set(emp, "soft_skills", parsed_model.soft_skills)
                 safe_set(emp, "languages", parsed_model.languages)
-                safe_set(emp, "certifications", parsed_model.certifications)
-                safe_set(emp, "achievements", parsed_model.achievements)
                 safe_set(emp, "hobbies", parsed_model.hobbies)
                 safe_set(emp, "cocurricular_activities", parsed_model.cocurricular_activities)
-                safe_set(emp, "address", parsed_model.address)
-                safe_set(emp, "city", parsed_model.city)
-                safe_set(emp, "country", parsed_model.country)
 
                 db.add(emp)
                 db.commit()
@@ -1039,15 +935,9 @@ async def chat(request: Request, req: ChatRequest | None = None):
                         "work_experience": parsed_model.work_experience,
                         "education": parsed_model.education,
                         "technical_skills": parsed_model.technical_skills,
-                        "soft_skills": parsed_model.soft_skills,
                         "languages": parsed_model.languages,
-                        "certifications": parsed_model.certifications,
-                        "achievements": parsed_model.achievements,
                         "hobbies": parsed_model.hobbies,
                         "cocurricular_activities": parsed_model.cocurricular_activities,
-                        "address": parsed_model.address,
-                        "city": parsed_model.city,
-                        "country": parsed_model.country,
                         "raw_text_preview": resume_content[:1000] if resume_content else None
                     }
                     doc_id = storage.save_extracted_data(emp.employee_id, f"chat_created_{emp.employee_id}.txt", extracted_json)
@@ -1059,7 +949,6 @@ async def chat(request: Request, req: ChatRequest | None = None):
                 work_exp_count = len(parsed_model.work_experience) if parsed_model.work_experience else 0
                 edu_count = len(parsed_model.education) if parsed_model.education else 0
                 skills_count = len(parsed_model.technical_skills) if parsed_model.technical_skills else 0
-                certs_count = len(parsed_model.certifications) if parsed_model.certifications else 0
 
                 success_reply = (
                     f"**Employee Created Successfully!**\n\n"
@@ -1068,13 +957,11 @@ async def chat(request: Request, req: ChatRequest | None = None):
                     f"- **Email:** {emp.email or 'N/A'}\n"
                     f"- **Phone:** {emp.phone or 'N/A'}\n"
                     f"- **Position:** {emp.position or 'N/A'}\n"
-                    f"- **City:** {emp.city or 'N/A'}\n"
-                    f"- **Country:** {emp.country or 'N/A'}\n\n"
+                    f"- **Department:** {emp.department or 'N/A'}\n\n"
                     f"**Extracted Data:**\n"
                     f"- Work Experience: {work_exp_count} entries\n"
                     f"- Education: {edu_count} entries\n"
-                    f"- Technical Skills: {skills_count} skills\n"
-                    f"- Certifications: {certs_count} certifications\n\n"
+                    f"- Technical Skills: {skills_count} skills\n\n"
                     f"The employee record has been added to both the SQL database and vector store."
                 )
 
@@ -1121,6 +1008,95 @@ async def chat(request: Request, req: ChatRequest | None = None):
         finally:
             db.close()
 
+    # =====================================================
+    # SIMPLE GREETING HANDLER
+    # Respond to basic greetings with a friendly, simple message
+    # without mentioning system-specific details
+    # =====================================================
+    greeting_patterns = [
+        "hi", "hello", "hey", "hii", "hiii", "howdy", "greetings",
+        "good morning", "good afternoon", "good evening", "good day",
+        "what's up", "whats up", "sup", "yo", "hola", "namaste"
+    ]
+
+    prompt_clean = prompt_lower.strip().rstrip("!.,?")
+    is_greeting = prompt_clean in greeting_patterns or any(
+        prompt_clean.startswith(g + " ") or prompt_clean.endswith(" " + g)
+        for g in greeting_patterns
+    )
+
+    if is_greeting and len(prompt.split()) <= 5:  # Short greeting
+        import random
+        greeting_responses = [
+            "Hello! How can I help you today?",
+            "Hi there! What can I do for you?",
+            "Hey! How can I assist you?",
+            "Hello! What would you like to know?",
+            "Hi! I'm here to help. What do you need?",
+            "Greetings! How may I assist you today?",
+        ]
+        greeting_reply = random.choice(greeting_responses)
+
+        conversation_store[session_id].append({"role": "user", "content": req.prompt})
+        conversation_store[session_id].append({"role": "assistant", "content": greeting_reply})
+
+        logger.info(f"[CHAT] → Handled simple greeting with: {greeting_reply}")
+
+        return {
+            "reply": greeting_reply,
+            "session_id": session_id,
+            "employee_id": None,
+            "employee_name": None
+        }
+
+    # =====================================================
+    # THANK YOU / FAREWELL HANDLER
+    # Respond to appreciation and goodbye messages politely
+    # =====================================================
+    thanks_patterns = ["thank you", "thanks", "thank u", "thx", "ty", "appreciate it", "appreciated"]
+    farewell_patterns = ["bye", "goodbye", "see you", "take care", "cya", "later", "good night"]
+
+    is_thanks = any(p in prompt_clean for p in thanks_patterns)
+    is_farewell = any(p in prompt_clean for p in farewell_patterns)
+
+    if (is_thanks or is_farewell) and len(prompt.split()) <= 6:
+        import random
+        if is_thanks and is_farewell:
+            responses = [
+                "You're welcome! Take care!",
+                "Glad I could help! Goodbye!",
+                "Happy to assist! See you later!",
+            ]
+        elif is_thanks:
+            responses = [
+                "You're welcome!",
+                "Happy to help!",
+                "Anytime! Let me know if you need anything else.",
+                "Glad I could assist!",
+                "No problem at all!",
+            ]
+        else:  # farewell
+            responses = [
+                "Goodbye! Have a great day!",
+                "Take care! See you later!",
+                "Bye! Feel free to come back anytime.",
+                "Goodbye! Have a wonderful day!",
+            ]
+
+        polite_reply = random.choice(responses)
+
+        conversation_store[session_id].append({"role": "user", "content": req.prompt})
+        conversation_store[session_id].append({"role": "assistant", "content": polite_reply})
+
+        logger.info(f"[CHAT] → Handled thanks/farewell with: {polite_reply}")
+
+        return {
+            "reply": polite_reply,
+            "session_id": session_id,
+            "employee_id": None,
+            "employee_name": None
+        }
+
     # Detect if this is a CRUD command and route accordingly
     crud_keywords = ["update", "delete", "remove", "create", "add", "change", "modify", "set"]
     is_crud = any(keyword in prompt.lower() for keyword in crud_keywords)
@@ -1163,6 +1139,10 @@ async def chat(request: Request, req: ChatRequest | None = None):
     # =====================================================
     # Note: prompt_lower is already defined at the beginning of this function
     word_count = len(prompt_lower.split())
+
+    # Flag to track if we've already prepared a prompt for LLM (e.g., list queries)
+    # This prevents the "NO EMPLOYEE CONTEXT" handler from overwriting it
+    llm_prompt_prepared = False
 
     # Comprehensive action keywords for LIST/READ operations
     action_keywords = [
@@ -1250,106 +1230,57 @@ async def chat(request: Request, req: ChatRequest | None = None):
         )
 
         # =====================================================
-        # HANDLE LIST ALL EMPLOYEES QUERY
+        # HANDLE LIST ALL EMPLOYEES QUERY - Route through LLM
+        # Instead of directly returning, we prepare context and let LLM respond
         # =====================================================
         if is_list_query and len(mentioned_employees) == 0:
-            logger.info(f"[CHAT] → Detected LIST ALL employees query")
+            logger.info(f"[CHAT] → Detected LIST ALL employees query - routing through LLM")
 
             if not all_employees:
-                return {
-                    "reply": "No employee records found in the database.",
-                    "session_id": session_id,
-                    "employee_id": None,
-                    "employee_name": None
-                }
+                # Even empty results go through LLM for natural response
+                all_employees_context = "DATABASE STATUS: No employee records found in the database."
+            else:
+                # Build employee data context for LLM
+                emp_data_list = []
+                for e in all_employees:
+                    emp_info = {
+                        "employee_id": e.employee_id or str(e.id),
+                        "name": e.name or "Unknown",
+                        "email": e.email or "N/A",
+                        "phone": getattr(e, 'phone', None) or "N/A",
+                        "department": getattr(e, 'department', None) or "N/A",
+                        "position": getattr(e, 'position', None) or "N/A",
+                        "city": getattr(e, 'city', None) or "N/A",
+                        "country": getattr(e, 'country', None) or "N/A",
+                        "technical_skills": getattr(e, 'technical_skills', None) or "N/A",
+                        "work_experience": getattr(e, 'work_experience', None) or "N/A",
+                        "education": getattr(e, 'education', None) or "N/A",
+                        "certifications": getattr(e, 'certifications', None) or "N/A",
+                    }
+                    emp_data_list.append(emp_info)
 
-            # Determine which fields the user wants to see
-            want_email = any(w in prompt_lower for w in ["email", "emails", "mail", "contact"])
-            want_phone = any(w in prompt_lower for w in ["phone", "phones", "number", "numbers", "mobile", "telephone"])
-            want_department = any(w in prompt_lower for w in ["department", "departments", "dept", "team"])
-            want_position = any(w in prompt_lower for w in ["position", "positions", "role", "roles", "title", "job", "designation"])
-            want_skills = any(w in prompt_lower for w in ["skill", "skills", "technical", "expertise"])
-            want_education = any(w in prompt_lower for w in ["education", "degree", "university", "college", "qualification"])
-            want_experience = any(w in prompt_lower for w in ["experience", "work history", "worked", "previous"])
-            want_address = any(w in prompt_lower for w in ["address", "location", "city"])
-            want_id = any(w in prompt_lower for w in ["id", "emp_id", "employee_id", "employee id"])
+                import json as _json
+                all_employees_context = f"DATABASE RECORDS ({len(all_employees)} employees):\n{_json.dumps(emp_data_list, indent=2, default=str)[:8000]}"
 
-            # If no specific fields requested, show basic info
-            no_specific_fields = not any([want_email, want_phone, want_department, want_position, want_skills, want_education, want_experience, want_address])
+            # Set emp to None for list queries (no single employee context)
+            emp = None
 
-            # Handle count queries
-            if "how many" in prompt_lower or "count" in prompt_lower or "total" in prompt_lower:
-                return {
-                    "reply": f"There are **{len(all_employees)}** employee(s) in the database.",
-                    "session_id": session_id,
-                    "employee_id": None,
-                    "employee_name": None
-                }
-
-            # Build the response
-            response_lines = []
-            response_lines.append(f"## Employee Records ({len(all_employees)} total)\n")
-
-            for emp in all_employees:
-                line_parts = [f"### {emp.name or 'Unknown'}"]
-                line_parts.append(f"- **Employee ID**: {emp.employee_id or emp.id}")
-
-                if no_specific_fields or want_email:
-                    email = emp.email or 'N/A'
-                    line_parts.append(f"- **Email**: {email}")
-
-                if no_specific_fields or want_phone:
-                    phone = getattr(emp, 'phone', None) or 'N/A'
-                    line_parts.append(f"- **Phone**: {phone}")
-
-                if no_specific_fields or want_department:
-                    dept = getattr(emp, 'department', None) or 'N/A'
-                    line_parts.append(f"- **Department**: {dept}")
-
-                if no_specific_fields or want_position:
-                    pos = getattr(emp, 'position', None) or 'N/A'
-                    line_parts.append(f"- **Position**: {pos}")
-
-                if want_skills:
-                    skills = getattr(emp, 'technical_skills', None) or 'N/A'
-                    if skills and len(skills) > 150:
-                        skills = skills[:150] + "..."
-                    line_parts.append(f"- **Skills**: {skills}")
-
-                if want_education:
-                    edu = getattr(emp, 'education', None) or 'N/A'
-                    if isinstance(edu, list):
-                        edu = ", ".join(str(e) for e in edu[:3])
-                    elif edu and len(str(edu)) > 100:
-                        edu = str(edu)[:100] + "..."
-                    line_parts.append(f"- **Education**: {edu}")
-
-                if want_experience:
-                    exp = getattr(emp, 'work_experience', None) or 'N/A'
-                    if isinstance(exp, list):
-                        exp = ", ".join(str(e) for e in exp[:3])
-                    elif exp and len(str(exp)) > 100:
-                        exp = str(exp)[:100] + "..."
-                    line_parts.append(f"- **Experience**: {exp}")
-
-                if want_address:
-                    addr = getattr(emp, 'address', None) or getattr(emp, 'location', None) or 'N/A'
-                    line_parts.append(f"- **Address**: {addr}")
-
-                response_lines.append("\n".join(line_parts))
-
-            reply = "\n\n".join(response_lines)
-
-            # Save to conversation memory
-            conversation_store[session_id].append({"role": "user", "content": req.prompt})
-            conversation_store[session_id].append({"role": "assistant", "content": reply})
-
-            return {
-                "reply": reply,
-                "session_id": session_id,
-                "employee_id": None,
-                "employee_name": None
-            }
+            # Build LLM prompt with employee data context
+            prompt = (
+                "You are an Employee Management System assistant. The user is asking about employee records.\n\n"
+                "INSTRUCTIONS:\n"
+                "1. Use ONLY the data provided below - do NOT make up information\n"
+                "2. Format your response nicely with markdown (headers, bullet points, tables if appropriate)\n"
+                "3. If the user asked for specific fields (email, skills, etc.), focus on those\n"
+                "4. Be concise but informative\n"
+                "5. If no records exist, say so politely\n\n"
+                f"{all_employees_context}\n\n"
+                f"User Query: {req.prompt}\n\n"
+                "Respond based on the actual database records above:"
+            )
+            logger.info(f"[CHAT] → Prepared LLM prompt with {len(all_employees)} employee records")
+            llm_prompt_prepared = True  # Mark that prompt is ready for LLM
+            # Fall through to LLM call at the end of the function
 
         # =====================================================
         # HANDLE READ QUERY FOR SPECIFIC EMPLOYEE(S)
@@ -1546,22 +1477,45 @@ async def chat(request: Request, req: ChatRequest | None = None):
         logger.info(f"[CHAT] → Routing to CRUD pipeline")
         # Route to NL-CRUD pipeline
         try:
-            # Parse the command using the NL-CRUD parser
+            # Parse the command using the NL-CRUD parser (enhanced for all edge cases)
             parse_prompt = (
-                "You are a JSON action parser. Convert the user's natural language command into a JSON object with keys:\n"
-                "action: one of [create, read, update, delete],\n"
-                "employee_id: integer or null,\n"
-                "employee_name: name of the employee (string) or null (if name is mentioned in command, extract it here),\n"
-                "fields: object of fields to set (for create/update). Allowed fields: name, email, phone, department, position.\n"
-                "Return ONLY valid JSON.\n"
-                "Examples:\n"
-                "- 'Update Arun from IT to HR department' -> {\"action\":\"update\", \"employee_id\":null, \"employee_name\":\"Arun\", \"fields\":{\"department\":\"HR\"}}\n"
-                "- 'Update employee 123 email to x@y.com' -> {\"action\":\"update\", \"employee_id\":123, \"employee_name\":null, \"fields\":{\"email\":\"x@y.com\"}}\n"
-                "- 'Create employee John in IT' -> {\"action\":\"create\", \"employee_id\":null, \"employee_name\":null, \"fields\":{\"name\":\"John\", \"department\":\"IT\"}}\n"
-                "- 'Delete John' -> {\"action\":\"delete\", \"employee_id\":null, \"employee_name\":\"John\", \"fields\":{}}\n"
-                "- 'Remove employee 5' -> {\"action\":\"delete\", \"employee_id\":5, \"employee_name\":null, \"fields\":{}}\n"
-                "- 'Delete the employee Arun Kumar' -> {\"action\":\"delete\", \"employee_id\":null, \"employee_name\":\"Arun Kumar\", \"fields\":{}}\n\n"
-                f"User command:\n{prompt}\n"
+                "You are a JSON action parser. Convert the user's natural language command into a JSON object.\n\n"
+                "OUTPUT FORMAT (return ONLY valid JSON):\n"
+                "{\n"
+                '  "action": "create|read|update|delete",\n'
+                '  "employee_id": "string ID or integer or null",\n'
+                '  "employee_name": "name string or null",\n'
+                '  "search_type": "name|position|skill|department|experience|seniority|location|date_range",\n'
+                '  "search_term": "the search term if applicable",\n'
+                '  "min_experience": "number or null (for experience queries)",\n'
+                '  "max_experience": "number or null",\n'
+                '  "date_range_start": "year or null",\n'
+                '  "date_range_end": "year or null",\n'
+                '  "exclude_terms": ["terms to exclude"] or null,\n'
+                '  "seniority_filter": "senior|junior|lead|manager or null",\n'
+                '  "is_bulk": true/false,\n'
+                '  "fields": {"field": "value"}\n'
+                "}\n\n"
+                "RULES:\n"
+                "1. Extract the EXACT name mentioned (e.g., 'pizzy', 'John Paul', 'Dev Raj')\n"
+                "2. For position search (e.g., 'find developers'), set search_type='position'\n"
+                "3. For skill search (e.g., 'python developers'), set search_type='skill'\n"
+                "4. For experience search (e.g., '5+ years'), set search_type='experience', min_experience=5\n"
+                "5. For seniority search (e.g., 'senior engineers'), set search_type='seniority', seniority_filter='senior'\n"
+                "6. For location search (e.g., 'in Bangalore'), set search_type='location'\n"
+                "7. For date range (e.g., '2020-2022'), set search_type='date_range', date_range_start=2020, date_range_end=2022\n"
+                "8. For negative search (e.g., 'except managers'), add to exclude_terms\n"
+                "9. If 'all', 'every', 'everyone' is used, set is_bulk=true\n\n"
+                "EXAMPLES:\n"
+                "- 'Update pizzy email' -> {\"action\":\"update\", \"employee_name\":\"pizzy\", \"search_type\":\"name\", \"is_bulk\":false}\n"
+                "- 'Find python developers' -> {\"action\":\"read\", \"search_type\":\"skill\", \"search_term\":\"python\"}\n"
+                "- 'Find employees with 5+ years experience' -> {\"action\":\"read\", \"search_type\":\"experience\", \"min_experience\":5}\n"
+                "- 'Show senior engineers' -> {\"action\":\"read\", \"search_type\":\"seniority\", \"search_term\":\"engineer\", \"seniority_filter\":\"senior\"}\n"
+                "- 'Find engineers except managers' -> {\"action\":\"read\", \"search_type\":\"position\", \"search_term\":\"engineer\", \"exclude_terms\":[\"manager\"]}\n"
+                "- 'Employees working 2020-2022' -> {\"action\":\"read\", \"search_type\":\"date_range\", \"date_range_start\":2020, \"date_range_end\":2022}\n"
+                "- 'Engineers in Bangalore' -> {\"action\":\"read\", \"search_type\":\"location\", \"search_term\":\"bangalore\"}\n"
+                "- 'Most senior developers' -> {\"action\":\"read\", \"search_type\":\"seniority\", \"search_term\":\"developer\", \"seniority_filter\":\"most_senior\"}\n\n"
+                f"User command:\n{prompt}\n\nJSON:"
             )
 
             parse_resp = llm.generate(parse_prompt)
@@ -1585,28 +1539,729 @@ async def chat(request: Request, req: ChatRequest | None = None):
             else:
                 # Validate and execute the CRUD operation
                 from sqlalchemy.orm import Session
+                import re as _re
                 db: Session = SessionLocal()
 
-                def resolve_employee(db, emp_id, emp_name):
-                    if emp_id:
-                        return db.query(models.Employee).filter(models.Employee.id == emp_id).first()
+                # =====================================================
+                # COMPREHENSIVE EMPLOYEE MATCHING SYSTEM
+                # Handles all edge cases: duplicates, partial matches,
+                # case variations, fuzzy matching, ID vs name confusion
+                # =====================================================
+
+                def normalize_name(name: str) -> str:
+                    """Normalize name for matching: lowercase, remove extra spaces/hyphens."""
+                    if not name:
+                        return ""
+                    # Lowercase
+                    name = name.lower().strip()
+                    # Replace hyphens and multiple spaces with single space
+                    name = _re.sub(r'[-_]+', ' ', name)
+                    name = _re.sub(r'\s+', ' ', name)
+                    return name
+
+                def get_name_variations(name: str) -> set:
+                    """Get all variations of a name for fuzzy matching."""
+                    variations = set()
+                    if not name:
+                        return variations
+
+                    normalized = normalize_name(name)
+                    variations.add(normalized)
+
+                    # Add without spaces (devraj from "dev raj")
+                    variations.add(normalized.replace(' ', ''))
+
+                    # Add individual parts
+                    parts = normalized.split()
+                    for part in parts:
+                        if len(part) > 2:
+                            variations.add(part)
+
+                    # Add reversed order (paul john from john paul)
+                    if len(parts) >= 2:
+                        variations.add(' '.join(reversed(parts)))
+
+                    return variations
+
+                def calculate_match_score(search_term: str, employee, match_type: str) -> dict:
+                    """Calculate how well an employee matches the search term.
+
+                    Returns dict with: employee, score, match_type, match_reason
+                    Higher score = better match
+                    """
+                    search_norm = normalize_name(search_term)
+                    search_variations = get_name_variations(search_term)
+
+                    result = {
+                        'employee': employee,
+                        'score': 0,
+                        'match_type': 'none',
+                        'match_reason': ''
+                    }
+
+                    # Check name field
+                    if employee.name:
+                        name_norm = normalize_name(employee.name)
+                        name_variations = get_name_variations(employee.name)
+
+                        # Exact match (highest priority)
+                        if search_norm == name_norm:
+                            result['score'] = 100
+                            result['match_type'] = 'exact'
+                            result['match_reason'] = 'Exact name match'
+                            return result
+
+                        # Case variation match
+                        if search_term.lower() == employee.name.lower():
+                            result['score'] = 95
+                            result['match_type'] = 'case_variant'
+                            result['match_reason'] = 'Case variation match'
+                            return result
+
+                        # Space/hyphen variation (dev raj = devraj = dev-raj)
+                        if search_norm.replace(' ', '') == name_norm.replace(' ', ''):
+                            result['score'] = 90
+                            result['match_type'] = 'space_variant'
+                            result['match_reason'] = 'Space/hyphen variation'
+                            return result
+
+                        # Reversed name match (john paul = paul john)
+                        search_parts = search_norm.split()
+                        name_parts = name_norm.split()
+                        if len(search_parts) >= 2 and len(name_parts) >= 2:
+                            if set(search_parts) == set(name_parts):
+                                result['score'] = 85
+                                result['match_type'] = 'reversed'
+                                result['match_reason'] = 'Reversed name order'
+                                return result
+
+                        # Full name contains search term
+                        if search_norm in name_norm:
+                            result['score'] = 70
+                            result['match_type'] = 'contains'
+                            result['match_reason'] = f'Name contains "{search_term}"'
+                            return result
+
+                        # Search term contains full name
+                        if name_norm in search_norm:
+                            result['score'] = 65
+                            result['match_type'] = 'contained'
+                            result['match_reason'] = f'Search contains name'
+                            return result
+
+                        # Partial match (any part of name matches)
+                        for part in search_norm.split():
+                            if len(part) > 2 and part in name_norm:
+                                result['score'] = 50
+                                result['match_type'] = 'partial'
+                                result['match_reason'] = f'Partial match on "{part}"'
+                                return result
+
+                        # Nickname/substring match (johnny contains john)
+                        for name_part in name_parts:
+                            if len(name_part) > 3:
+                                for search_part in search_parts:
+                                    if len(search_part) > 2:
+                                        if search_part in name_part or name_part.startswith(search_part):
+                                            result['score'] = 40
+                                            result['match_type'] = 'nickname'
+                                            result['match_reason'] = f'Nickname/substring match'
+                                            return result
+
+                    # Check email field (devraj in devraj@company.com)
+                    if employee.email:
+                        email_local = employee.email.split('@')[0].lower()
+                        if search_norm.replace(' ', '') in email_local or email_local in search_norm.replace(' ', ''):
+                            result['score'] = 30
+                            result['match_type'] = 'email'
+                            result['match_reason'] = f'Email match ({employee.email})'
+                            return result
+
+                    return result
+
+                def find_all_matches(db, search_term: str, match_type: str = 'name') -> list:
+                    """Find ALL employees matching search term with scoring.
+
+                    Args:
+                        db: Database session
+                        search_term: The name/term to search for
+                        match_type: 'name', 'position', 'skill'
+
+                    Returns:
+                        List of match dicts sorted by score (highest first)
+                    """
+                    all_employees = db.query(models.Employee).all()
+                    matches = []
+
+                    for emp in all_employees:
+                        if match_type == 'name':
+                            result = calculate_match_score(search_term, emp, match_type)
+                        elif match_type == 'position':
+                            # Position-based matching
+                            result = {'employee': emp, 'score': 0, 'match_type': 'none', 'match_reason': ''}
+                            if emp.position:
+                                pos_norm = normalize_name(emp.position)
+                                search_norm = normalize_name(search_term)
+                                if search_norm in pos_norm:
+                                    result['score'] = 80
+                                    result['match_type'] = 'position'
+                                    result['match_reason'] = f'Position: {emp.position}'
+                                elif any(part in pos_norm for part in search_norm.split() if len(part) > 2):
+                                    result['score'] = 60
+                                    result['match_type'] = 'position_partial'
+                                    result['match_reason'] = f'Position contains: {emp.position}'
+                        elif match_type == 'skill':
+                            # Skill-based matching
+                            result = {'employee': emp, 'score': 0, 'match_type': 'none', 'match_reason': ''}
+                            if emp.technical_skills:
+                                skills_lower = emp.technical_skills.lower()
+                                search_norm = normalize_name(search_term)
+                                # Check exact skill
+                                if search_norm in skills_lower:
+                                    result['score'] = 80
+                                    result['match_type'] = 'skill_exact'
+                                    result['match_reason'] = f'Has skill: {search_term}'
+                                # Check skill variants (python, python3, jpython)
+                                elif any(search_norm in skill.lower() or skill.lower() in search_norm
+                                        for skill in skills_lower.split(',')):
+                                    result['score'] = 60
+                                    result['match_type'] = 'skill_variant'
+                                    result['match_reason'] = f'Has related skill'
+                        else:
+                            result = calculate_match_score(search_term, emp, match_type)
+
+                        if result['score'] > 0:
+                            matches.append(result)
+
+                    # Sort by score (highest first)
+                    matches.sort(key=lambda x: x['score'], reverse=True)
+                    return matches
+
+                def resolve_employee_with_duplicates(db, emp_id, emp_name):
+                    """Find employee(s) matching the given ID or name.
+
+                    COMPREHENSIVE MATCHING:
+                    - Case-insensitive matching
+                    - Space/hyphen variations (Dev Raj = Devraj = Dev-Raj)
+                    - Partial name matching (Jonathan matches "john")
+                    - Email-based matching (devraj@company.com)
+                    - Reversed name matching (John Paul = Paul John)
+
+                    Returns:
+                        Tuple of (single_employee_or_None, list_of_all_matches, is_id_ambiguous)
+                    """
+                    is_id_ambiguous = False
+
+                    if emp_id is not None:
+                        # Check if this could be both an ID and a name (edge case #6)
+                        emp_id_str = str(emp_id)
+
+                        # Try as internal ID (integer)
+                        try:
+                            emp = db.query(models.Employee).filter(models.Employee.id == int(emp_id_str)).first()
+                            if emp:
+                                # Also check if there's an employee NAMED this number
+                                name_matches = find_all_matches(db, emp_id_str, 'name')
+                                if name_matches and any(m['score'] >= 70 for m in name_matches):
+                                    is_id_ambiguous = True
+                                return (emp, [emp], is_id_ambiguous)
+                        except (ValueError, TypeError):
+                            pass
+
+                        # Try as employee_id string (6-digit format)
+                        emp_id_padded = emp_id_str.zfill(6)
+                        emp = db.query(models.Employee).filter(models.Employee.employee_id == emp_id_padded).first()
+                        if emp:
+                            return (emp, [emp], False)
+
+                        # Try without zero-padding
+                        emp = db.query(models.Employee).filter(models.Employee.employee_id == emp_id_str).first()
+                        if emp:
+                            return (emp, [emp], False)
+
+                        return (None, [], False)
+
                     elif emp_name:
-                        emp = db.query(models.Employee).filter(models.Employee.name.ilike(f"%{emp_name}%")).first()
-                        if not emp:
-                            emp = db.query(models.Employee).filter(models.Employee.name == emp_name).first()
-                        return emp
-                    return None
+                        # Use comprehensive matching
+                        matches = find_all_matches(db, emp_name, 'name')
+
+                        if not matches:
+                            return (None, [], False)
+
+                        # If only one match with high confidence, return it
+                        if len(matches) == 1 and matches[0]['score'] >= 70:
+                            return (matches[0]['employee'], [matches[0]], False)
+
+                        # If multiple matches, need clarification
+                        if len(matches) > 1:
+                            return (None, matches, False)
+
+                        # Single low-confidence match - still ask for confirmation
+                        return (None, matches, False)
+
+                    return (None, [], False)
+
+                def detect_bulk_operation(prompt_text: str, fields: dict) -> tuple:
+                    """Detect if this is a bulk operation affecting multiple employees.
+
+                    Returns: (is_bulk, bulk_type, affected_group)
+                    """
+                    prompt_lower = prompt_text.lower()
+                    bulk_keywords = ['all', 'every', 'everyone', 'all employees', 'each', 'bulk']
+
+                    is_bulk = any(kw in prompt_lower for kw in bulk_keywords)
+
+                    if is_bulk:
+                        # Detect what group is affected
+                        if 'engineer' in prompt_lower or 'developer' in prompt_lower:
+                            return (True, 'position', 'engineers/developers')
+                        elif 'manager' in prompt_lower:
+                            return (True, 'position', 'managers')
+                        elif 'department' in prompt_lower:
+                            return (True, 'department', 'department group')
+                        else:
+                            return (True, 'all', 'all employees')
+
+                    return (False, None, None)
+
+                def format_employee_summary(emp, match_info=None):
+                    """Format employee details for clarification message."""
+                    details = [f"**Employee ID:** {emp.employee_id}"]
+                    if emp.name:
+                        details.append(f"**Name:** {emp.name}")
+                    if emp.email:
+                        details.append(f"**Email:** {emp.email}")
+                    if emp.phone:
+                        details.append(f"**Phone:** {emp.phone}")
+                    if emp.department:
+                        details.append(f"**Department:** {emp.department}")
+                    if emp.position:
+                        details.append(f"**Position:** {emp.position}")
+
+                    summary = " | ".join(details)
+
+                    # Add match reason if available
+                    if match_info and isinstance(match_info, dict):
+                        match_type = match_info.get('match_type', '')
+                        match_reason = match_info.get('match_reason', '')
+                        if match_type and match_type != 'exact':
+                            summary += f" *[{match_reason}]*"
+
+                    return summary
+
+                def format_clarification_message(matches: list, search_term: str, action: str) -> str:
+                    """Format a clarification message for multiple matches."""
+                    action_verb = {
+                        'update': 'update',
+                        'delete': 'delete',
+                        'read': 'view'
+                    }.get(action, action)
+
+                    msg = f"⚠️ **Found {len(matches)} possible matches for '{search_term}'!**\n\n"
+                    msg += f"Please specify which employee you want to {action_verb} by using their **Employee ID**.\n\n"
+                    msg += "**Matching employees:**\n"
+
+                    for i, match in enumerate(matches[:10], 1):  # Limit to 10 results
+                        if isinstance(match, dict):
+                            emp = match.get('employee')
+                            msg += f"\n{i}. {format_employee_summary(emp, match)}\n"
+                        else:
+                            msg += f"\n{i}. {format_employee_summary(match)}\n"
+
+                    if len(matches) > 10:
+                        msg += f"\n*...and {len(matches) - 10} more matches*\n"
+
+                    # Add example command
+                    first_match = matches[0]
+                    emp_id = first_match.get('employee').employee_id if isinstance(first_match, dict) else first_match.employee_id
+                    msg += f"\n**Example:** \"{action.capitalize()} employee {emp_id}"
+                    if action == 'update':
+                        msg += " email to new@example.com"
+                    msg += "\""
+
+                    return msg
 
                 try:
                     action = proposal.get("action")
                     emp_id = proposal.get("employee_id")
                     emp_name = proposal.get("employee_name")
                     fields = proposal.get("fields") or {}
+                    search_type = proposal.get("search_type", "name")
+                    search_term = proposal.get("search_term")
+                    is_bulk_from_llm = proposal.get("is_bulk", False)
 
+                    # =====================================================
+                    # Extract additional parameters for advanced queries
+                    # =====================================================
+                    min_experience = proposal.get("min_experience")
+                    max_experience = proposal.get("max_experience")
+                    date_range_start = proposal.get("date_range_start")
+                    date_range_end = proposal.get("date_range_end")
+                    exclude_terms = proposal.get("exclude_terms") or []
+                    seniority_filter = proposal.get("seniority_filter")
+
+                    # =====================================================
+                    # EDGE CASE #13: SKILL SYNONYM SEARCH
+                    # "javascript developers" finds JS, React, Node.js, etc.
+                    # =====================================================
+                    if search_type == 'skill' and action == 'read':
+                        term = search_term or emp_name or ''
+                        expanded_skills = expand_skill_search(term)
+
+                        all_employees = db.query(models.Employee).all()
+                        matches = []
+
+                        for emp in all_employees:
+                            matched, matched_skill = skills_match(term, emp.technical_skills)
+                            if matched:
+                                matches.append({
+                                    'employee': emp,
+                                    'match_reason': f'Has skill: {matched_skill}',
+                                    'score': 80
+                                })
+
+                        # Apply negative filter if specified
+                        if exclude_terms:
+                            filtered_emps = apply_negative_filter(
+                                [m['employee'] for m in matches],
+                                [], exclude_terms, 'position'
+                            )
+                            matches = [m for m in matches if m['employee'] in filtered_emps]
+
+                        if not matches:
+                            expanded_list = ", ".join(expanded_skills[:5])
+                            return {"reply": f"❌ No employees found with skill: '{term}'\n\n*Searched for: {expanded_list}*", "session_id": session_id}
+
+                        info_msg = f"📋 **Found {len(matches)} employees with '{term}' skills:**\n"
+                        info_msg += f"*Searched for: {', '.join(expanded_skills[:5])}*\n"
+
+                        for i, match in enumerate(matches[:10], 1):
+                            emp = match['employee']
+                            info_msg += f"\n{i}. **{emp.name}** (ID: {emp.employee_id})"
+                            if emp.position:
+                                info_msg += f" - {emp.position}"
+                            info_msg += f" *[{match['match_reason']}]*\n"
+
+                        if len(matches) > 10:
+                            info_msg += f"\n*...and {len(matches) - 10} more matches*\n"
+
+                        return {"reply": info_msg, "session_id": session_id}
+
+                    # =====================================================
+                    # EDGE CASE #1: EXPERIENCE CALCULATION
+                    # "find 5+ years experience" with accurate calculation
+                    # =====================================================
+                    if search_type == 'experience' and action == 'read':
+                        results = find_employees_by_experience(db, min_experience, max_experience)
+
+                        if not results:
+                            exp_desc = ""
+                            if min_experience:
+                                exp_desc = f"{min_experience}+ years"
+                            if max_experience:
+                                exp_desc = f"up to {max_experience} years" if not min_experience else f"{min_experience}-{max_experience} years"
+                            return {"reply": f"❌ No employees found with {exp_desc} experience", "session_id": session_id}
+
+                        info_msg = f"📋 **Found {len(results)} employees"
+                        if min_experience:
+                            info_msg += f" with {min_experience}+ years experience"
+                        info_msg += ":**\n"
+
+                        for i, (emp, years) in enumerate(results[:15], 1):
+                            info_msg += f"\n{i}. **{emp.name}** (ID: {emp.employee_id})"
+                            info_msg += f" - **{years} years** experience"
+                            if emp.position:
+                                info_msg += f" | {emp.position}"
+                            info_msg += "\n"
+
+                        if len(results) > 15:
+                            info_msg += f"\n*...and {len(results) - 15} more*\n"
+
+                        return {"reply": info_msg, "session_id": session_id}
+
+                    # =====================================================
+                    # EDGE CASE #2: DATE RANGE OVERLAP QUERY
+                    # "employees working 2020-2022" with proper overlap logic
+                    # =====================================================
+                    if search_type == 'date_range' and action == 'read':
+                        start_year = date_range_start or 2020
+                        end_year = date_range_end or start_year
+
+                        results = find_employees_in_date_range(db, start_year, end_year)
+
+                        if not results:
+                            return {"reply": f"❌ No employees found working during {start_year}-{end_year}", "session_id": session_id}
+
+                        info_msg = f"📋 **Found {len(results)} employees working during {start_year}-{end_year}:**\n"
+
+                        for i, (emp, overlaps) in enumerate(results[:10], 1):
+                            info_msg += f"\n{i}. **{emp.name}** (ID: {emp.employee_id})\n"
+                            for overlap in overlaps[:2]:
+                                job = overlap['job']
+                                overlap_type = overlap['overlap_type']
+                                info_msg += f"   • {job.get('company', 'Unknown')} ({job.get('duration', 'N/A')}) *[{overlap_type}]*\n"
+
+                        if len(results) > 10:
+                            info_msg += f"\n*...and {len(results) - 10} more*\n"
+
+                        return {"reply": info_msg, "session_id": session_id}
+
+                    # =====================================================
+                    # EDGE CASE #9: TITLE SENIORITY SEARCH
+                    # "senior engineers", "most senior" with proper ranking
+                    # =====================================================
+                    if search_type == 'seniority' and action == 'read':
+                        term = search_term or ''
+                        all_employees = db.query(models.Employee).all()
+
+                        # Filter by position term if provided
+                        if term:
+                            all_employees = [e for e in all_employees if e.position and term.lower() in e.position.lower()]
+
+                        # Calculate seniority scores
+                        scored = []
+                        for emp in all_employees:
+                            score = get_title_seniority(emp.position)
+                            scored.append((emp, score))
+
+                        # Filter by seniority level
+                        if seniority_filter == 'senior':
+                            scored = [(e, s) for e, s in scored if s >= 5]
+                        elif seniority_filter == 'junior':
+                            scored = [(e, s) for e, s in scored if s <= 3]
+                        elif seniority_filter == 'lead':
+                            scored = [(e, s) for e, s in scored if s >= 6]
+                        elif seniority_filter == 'most_senior':
+                            # Sort by score descending and take top results
+                            pass
+
+                        # Sort by seniority score descending
+                        scored.sort(key=lambda x: x[1], reverse=True)
+
+                        if not scored:
+                            return {"reply": f"❌ No employees found matching seniority criteria", "session_id": session_id}
+
+                        seniority_labels = {
+                            1: "Entry", 2: "Junior", 3: "Associate", 4: "Mid",
+                            5: "Senior", 6: "Lead", 7: "Staff", 8: "Principal",
+                            9: "Director", 10: "Executive"
+                        }
+
+                        info_msg = f"📋 **Found {len(scored)} employees"
+                        if seniority_filter:
+                            info_msg += f" ({seniority_filter} level)"
+                        if term:
+                            info_msg += f" matching '{term}'"
+                        info_msg += " (sorted by seniority):**\n"
+
+                        for i, (emp, score) in enumerate(scored[:10], 1):
+                            level = seniority_labels.get(score, "Unknown")
+                            info_msg += f"\n{i}. **{emp.name}** (ID: {emp.employee_id})"
+                            info_msg += f" - {emp.position or 'N/A'} *[Level {score}: {level}]*\n"
+
+                        if len(scored) > 10:
+                            info_msg += f"\n*...and {len(scored) - 10} more*\n"
+
+                        return {"reply": info_msg, "session_id": session_id}
+
+                    # =====================================================
+                    # EDGE CASE #14: NEGATIVE SEARCH
+                    # "engineers except managers" excludes correctly
+                    # =====================================================
+                    if search_type == 'position' and exclude_terms and action == 'read':
+                        term = search_term or ''
+                        all_employees = db.query(models.Employee).all()
+
+                        # Apply positive and negative filters
+                        results = apply_negative_filter(
+                            all_employees,
+                            [term] if term else [],
+                            exclude_terms,
+                            'position'
+                        )
+
+                        if not results:
+                            return {"reply": f"❌ No employees found matching '{term}' excluding {exclude_terms}", "session_id": session_id}
+
+                        info_msg = f"📋 **Found {len(results)} employees matching '{term}' (excluding: {', '.join(exclude_terms)}):**\n"
+
+                        for i, emp in enumerate(results[:10], 1):
+                            info_msg += f"\n{i}. **{emp.name}** (ID: {emp.employee_id})"
+                            if emp.position:
+                                info_msg += f" - {emp.position}"
+                            info_msg += "\n"
+
+                        if len(results) > 10:
+                            info_msg += f"\n*...and {len(results) - 10} more*\n"
+
+                        return {"reply": info_msg, "session_id": session_id}
+
+                    # =====================================================
+                    # EDGE CASE #15: LOCATION/CITY FUZZY SEARCH
+                    # "engineers in Bangalore" finds Bangalore, Bengaluru, BLR
+                    # =====================================================
+                    if search_type == 'location' and action == 'read':
+                        location_term = search_term or ''
+                        position_term = emp_name or ''
+                        expanded_locations = expand_city_search(location_term)
+
+                        all_employees = db.query(models.Employee).all()
+                        matches = []
+
+                        for emp in all_employees:
+                            # Check if employee has location data (in raw_text or other fields)
+                            emp_location = ''
+                            if emp.raw_text:
+                                emp_location = emp.raw_text.lower()
+
+                            location_match = any(loc in emp_location for loc in expanded_locations)
+
+                            # Also filter by position if specified
+                            position_match = not position_term or (emp.position and position_term.lower() in emp.position.lower())
+
+                            if location_match and position_match:
+                                matches.append(emp)
+
+                        if not matches:
+                            return {"reply": f"❌ No employees found in location: '{location_term}'\n*Searched for: {', '.join(expanded_locations[:5])}*", "session_id": session_id}
+
+                        info_msg = f"📋 **Found {len(matches)} employees in '{location_term}':**\n"
+                        info_msg += f"*Searched locations: {', '.join(expanded_locations[:5])}*\n"
+
+                        for i, emp in enumerate(matches[:10], 1):
+                            info_msg += f"\n{i}. **{emp.name}** (ID: {emp.employee_id})"
+                            if emp.position:
+                                info_msg += f" - {emp.position}"
+                            info_msg += "\n"
+
+                        if len(matches) > 10:
+                            info_msg += f"\n*...and {len(matches) - 10} more*\n"
+
+                        return {"reply": info_msg, "session_id": session_id}
+
+                    # =====================================================
+                    # STANDARD POSITION SEARCH (without skill synonyms)
+                    # =====================================================
+                    if search_type == 'position' and action == 'read' and not exclude_terms:
+                        term = search_term or emp_name or ''
+                        matches = find_all_matches(db, term, search_type)
+
+                        if not matches:
+                            return {"reply": f"❌ No employees found with position: '{term}'", "session_id": session_id}
+
+                        if len(matches) > 1:
+                            info_msg = f"📋 **Found {len(matches)} employees with position matching '{term}':**\n"
+                            info_msg += "\nPlease specify which one by **Employee ID** if you need to perform an action.\n"
+
+                            for i, match in enumerate(matches[:10], 1):
+                                emp_match = match.get('employee')
+                                match_reason = match.get('match_reason', '')
+                                info_msg += f"\n{i}. **{emp_match.name}** (ID: {emp_match.employee_id})"
+                                if emp_match.position:
+                                    info_msg += f" - {emp_match.position}"
+                                if match_reason:
+                                    info_msg += f" *[{match_reason}]*"
+                                info_msg += "\n"
+
+                            if len(matches) > 10:
+                                info_msg += f"\n*...and {len(matches) - 10} more matches*\n"
+
+                            return {"reply": info_msg, "session_id": session_id}
+
+                        # Single match
+                        emp = matches[0].get('employee')
+                        info = [
+                            f"**Employee ID:** {emp.employee_id}",
+                            f"**Name:** {emp.name}",
+                            f"**Position:** {emp.position or 'N/A'}",
+                            f"**Department:** {emp.department or 'N/A'}",
+                            f"**Email:** {emp.email or 'N/A'}",
+                            f"**Technical Skills:** {emp.technical_skills or 'N/A'}"
+                        ]
+                        return {"reply": "\n".join(info), "session_id": session_id}
+
+                    # =====================================================
+                    # EDGE CASE #10: BULK OPERATION DETECTION
+                    # Detect dangerous bulk operations and require confirmation
+                    # =====================================================
+                    is_bulk_detected, bulk_type, affected_group = detect_bulk_operation(prompt, fields)
+                    is_bulk = is_bulk_from_llm or is_bulk_detected
+                    if is_bulk and action in ['update', 'delete']:
+                        # Count affected employees
+                        if bulk_type == 'all':
+                            affected_count = db.query(models.Employee).count()
+                        elif bulk_type == 'position':
+                            affected_count = db.query(models.Employee).filter(
+                                models.Employee.position.ilike(f"%{affected_group.split('/')[0]}%")
+                            ).count()
+                        else:
+                            affected_count = db.query(models.Employee).count()
+
+                        if affected_count > 1:
+                            warning_msg = (
+                                f"🚨 **BULK OPERATION WARNING**\n\n"
+                                f"This operation would affect **{affected_count} employees** ({affected_group}).\n\n"
+                                f"Bulk operations are risky and not recommended.\n\n"
+                                f"**Safe alternatives:**\n"
+                                f"• **A)** Update ONE employee: Specify employee ID (e.g., \"Update employee 000123 ...\")\n"
+                                f"• **B)** View affected list first: \"Show all {affected_group}\"\n"
+                                f"• **C)** Abort this operation\n\n"
+                                f"Please reply with **A**, **B**, or **C**, or specify a single employee ID."
+                            )
+                            return {"reply": warning_msg, "session_id": session_id}
+
+                    # =====================================================
+                    # EDGE CASE #6: ID VS NAME CONFUSION
+                    # Detect when input could be both an ID and a name
+                    # =====================================================
+                    if emp_id is not None and emp_name is None:
+                        emp_id_str = str(emp_id)
+                        # Check if this looks like it could be a name (not purely numeric)
+                        if emp_id_str.isdigit():
+                            # Check if there's ALSO an employee named with this number
+                            name_matches = find_all_matches(db, emp_id_str, 'name')
+                            id_match = None
+
+                            # Try to find by ID
+                            try:
+                                id_match = db.query(models.Employee).filter(models.Employee.id == int(emp_id_str)).first()
+                            except:
+                                pass
+                            if not id_match:
+                                id_match = db.query(models.Employee).filter(
+                                    models.Employee.employee_id == emp_id_str.zfill(6)
+                                ).first()
+
+                            # If both ID match and name matches exist, ask for clarification
+                            if id_match and name_matches and any(m['score'] >= 50 for m in name_matches):
+                                clarification_msg = (
+                                    f"❓ **Ambiguous input: '{emp_id_str}'**\n\n"
+                                    f"Is '{emp_id_str}' an **Employee ID** or a **name**?\n\n"
+                                    f"• **If ID:** Will {action} **{id_match.name}** (Employee ID: {id_match.employee_id})\n"
+                                    f"• **If name:** Found {len(name_matches)} employee(s) with matching names\n\n"
+                                    f"Please reply with:\n"
+                                    f"• \"ID\" to use as Employee ID\n"
+                                    f"• \"name\" to search by name\n"
+                                    f"• Or specify clearly: \"{action} employee ID {emp_id_str}\" or \"{action} employee named {emp_id_str}\""
+                                )
+                                return {"reply": clarification_msg, "session_id": session_id}
+
+                    # =====================================================
+                    # ACTION: UPDATE
+                    # =====================================================
                     if action == "update":
-                        emp = resolve_employee(db, emp_id, emp_name)
+                        emp, all_matches, is_id_ambiguous = resolve_employee_with_duplicates(db, emp_id, emp_name)
+
+                        # Handle multiple matches - ask for clarification
+                        if not emp and len(all_matches) > 0:
+                            search_term = emp_name or str(emp_id)
+                            logger.info(f"[CRUD] Multiple/ambiguous matches for '{search_term}': {len(all_matches)} matches")
+                            clarification_msg = format_clarification_message(all_matches, search_term, 'update')
+                            return {"reply": clarification_msg, "session_id": session_id}
+
                         if not emp:
-                            return {"reply": f"I couldn't find an employee named '{emp_name}' or with ID {emp_id}. Could you provide more details?"}
+                            search_term = emp_name or str(emp_id)
+                            return {"reply": f"❌ I couldn't find any employee matching '{search_term}'.\n\nTry:\n• Check spelling\n• Use Employee ID instead\n• \"Show all employees\" to see the list"}
 
                         # Build a confirmation message
                         changes = []
@@ -1619,11 +2274,27 @@ async def chat(request: Request, req: ChatRequest | None = None):
                         db.add(emp)
                         db.commit()
 
-                        reply = f"Updated employee **{emp.name}** (ID: {emp.id}):\n" + "\n".join(f"- {c}" for c in changes)
-                        return {"reply": reply}
+                        reply = f"✅ Updated employee **{emp.name}** (Employee ID: {emp.employee_id}):\n" + "\n".join(f"• {c}" for c in changes)
+                        return {"reply": reply, "session_id": session_id}
 
+                    # =====================================================
+                    # ACTION: CREATE
+                    # =====================================================
                     elif action == "create":
+                        # Generate employee_id
+                        from sqlalchemy import text as sql_text
+                        try:
+                            result = db.execute(sql_text(
+                                "SELECT COALESCE(MAX(CAST(employee_id AS INTEGER)), 0) + 1 FROM employees WHERE employee_id IS NOT NULL"
+                            )).scalar()
+                            next_id = result if result else 1
+                        except Exception:
+                            count = db.query(models.Employee).count()
+                            next_id = count + 1
+                        new_employee_id = str(next_id).zfill(6)
+
                         emp = models.Employee(
+                            employee_id=new_employee_id,
                             name=fields.get("name") or "Unknown",
                             email=fields.get("email"),
                             phone=fields.get("phone"),
@@ -1634,31 +2305,94 @@ async def chat(request: Request, req: ChatRequest | None = None):
                         db.add(emp)
                         db.commit()
                         db.refresh(emp)
-                        return {"reply": f"Created new employee **{emp.name}** (ID: {emp.id}) in {emp.department or 'no department'}."}
+                        return {"reply": f"✅ Created new employee **{emp.name}** (Employee ID: {emp.employee_id}) in {emp.department or 'no department'}.", "session_id": session_id}
 
+                    # =====================================================
+                    # ACTION: DELETE
+                    # =====================================================
                     elif action == "delete":
-                        emp = resolve_employee(db, emp_id, emp_name)
+                        emp, all_matches, is_id_ambiguous = resolve_employee_with_duplicates(db, emp_id, emp_name)
+
+                        # Handle multiple matches - ask for clarification
+                        if not emp and len(all_matches) > 0:
+                            search_term = emp_name or str(emp_id)
+                            logger.info(f"[CRUD] Multiple/ambiguous matches for deletion '{search_term}': {len(all_matches)} matches")
+                            clarification_msg = format_clarification_message(all_matches, search_term, 'delete')
+                            return {"reply": clarification_msg, "session_id": session_id}
+
                         if not emp:
-                            return {"reply": f"I couldn't find an employee to delete with name '{emp_name}' or ID {emp_id}."}
+                            search_term = emp_name or str(emp_id)
+                            return {"reply": f"❌ I couldn't find any employee matching '{search_term}'.\n\nTry:\n• Check spelling\n• Use Employee ID instead\n• \"Show all employees\" to see the list"}
+
+                        # Confirm before delete
                         emp_name_copy = emp.name
-                        emp_id_copy = emp.id
+                        emp_employee_id_copy = emp.employee_id
+                        emp_email_copy = emp.email
+                        emp_position_copy = emp.position
+
                         db.delete(emp)
                         db.commit()
-                        return {"reply": f"Deleted employee **{emp_name_copy}** (ID: {emp_id_copy})."}
 
+                        reply = (
+                            f"🗑️ **Deleted employee:**\n\n"
+                            f"• **Name:** {emp_name_copy}\n"
+                            f"• **Employee ID:** {emp_employee_id_copy}\n"
+                            f"• **Email:** {emp_email_copy or 'N/A'}\n"
+                            f"• **Position:** {emp_position_copy or 'N/A'}\n\n"
+                            f"*This action cannot be undone.*"
+                        )
+                        return {"reply": reply, "session_id": session_id}
+
+                    # =====================================================
+                    # ACTION: READ
+                    # =====================================================
                     elif action == "read":
-                        emp = resolve_employee(db, emp_id, emp_name)
+                        emp, all_matches, is_id_ambiguous = resolve_employee_with_duplicates(db, emp_id, emp_name)
+
+                        # Handle multiple matches - show all with details
+                        if not emp and len(all_matches) > 0:
+                            search_term = emp_name or str(emp_id)
+                            logger.info(f"[CRUD] Multiple matches for read '{search_term}': {len(all_matches)} matches")
+
+                            info_msg = f"📋 **Found {len(all_matches)} employees matching '{search_term}':**\n"
+
+                            for i, match in enumerate(all_matches[:10], 1):
+                                if isinstance(match, dict):
+                                    emp_match = match.get('employee')
+                                    match_reason = match.get('match_reason', '')
+                                else:
+                                    emp_match = match
+                                    match_reason = ''
+
+                                info_msg += f"\n**--- Employee {i}"
+                                if match_reason:
+                                    info_msg += f" [{match_reason}]"
+                                info_msg += " ---**\n"
+                                info_msg += f"**Employee ID:** {emp_match.employee_id}\n"
+                                info_msg += f"**Name:** {emp_match.name}\n"
+                                info_msg += f"**Email:** {emp_match.email or 'N/A'}\n"
+                                info_msg += f"**Phone:** {getattr(emp_match, 'phone', 'N/A') or 'N/A'}\n"
+                                info_msg += f"**Department:** {getattr(emp_match, 'department', 'N/A') or 'N/A'}\n"
+                                info_msg += f"**Position:** {getattr(emp_match, 'position', 'N/A') or 'N/A'}\n"
+
+                            if len(all_matches) > 10:
+                                info_msg += f"\n*...and {len(all_matches) - 10} more matches*\n"
+
+                            return {"reply": info_msg, "session_id": session_id}
+
                         if not emp:
-                            return {"reply": f"I couldn't find an employee with name '{emp_name}' or ID {emp_id}."}
+                            search_term = emp_name or str(emp_id)
+                            return {"reply": f"❌ I couldn't find any employee matching '{search_term}'.\n\nTry:\n• Check spelling\n• Use Employee ID instead\n• \"Show all employees\" to see the list"}
+
                         info = [
+                            f"**Employee ID:** {emp.employee_id}",
                             f"**Name:** {emp.name}",
-                            f"**ID:** {emp.id}",
                             f"**Email:** {emp.email or 'N/A'}",
                             f"**Phone:** {getattr(emp, 'phone', 'N/A') or 'N/A'}",
                             f"**Department:** {getattr(emp, 'department', 'N/A') or 'N/A'}",
                             f"**Position:** {getattr(emp, 'position', 'N/A') or 'N/A'}"
                         ]
-                        return {"reply": "\n".join(info)}
+                        return {"reply": "\n".join(info), "session_id": session_id}
 
                 finally:
                     db.close()
@@ -1689,21 +2423,19 @@ async def chat(request: Request, req: ChatRequest | None = None):
             logger.info(f"[CHAT] → Employee names in DB: {names}")
 
         # Step 1: Search for employee name in CURRENT prompt FIRST
+        # IMPORTANT: Collect ALL matching employees (handles duplicates with same name)
         logger.info(f"[CHAT] → Searching for employee name in current prompt...")
         prompt_lower_for_search = req.prompt.lower()  # Use req.prompt directly
+        matching_employees = []  # Collect ALL matches for duplicate handling
 
         # Try exact full name match first
         for candidate in all_employees:
             if candidate.name and candidate.name.lower() in prompt_lower_for_search:
-                emp = candidate
-                logger.info(f"[CHAT] ✓ Found employee by EXACT name match: '{emp.name}' (ID: {emp.id})")
-                # Store as active employee for this session
-                active_employee_store[session_id] = emp.id
-                logger.info(f"[CHAT] → Updated active employee for session")
-                break
+                matching_employees.append(candidate)
+                logger.info(f"[CHAT] ✓ Found employee by EXACT name match: '{candidate.name}' (ID: {candidate.id}, employee_id: {candidate.employee_id})")
 
         # If no exact match, try partial matching (first name or last name)
-        if not emp:
+        if not matching_employees:
             logger.info(f"[CHAT] → No exact match, trying partial name matching...")
             for candidate in all_employees:
                 if candidate.name:
@@ -1711,14 +2443,18 @@ async def chat(request: Request, req: ChatRequest | None = None):
                     name_parts = candidate.name.lower().split()
                     for part in name_parts:
                         if len(part) > 2 and part in prompt_lower_for_search:  # Skip very short parts
-                            emp = candidate
-                            logger.info(f"[CHAT] ✓ Found employee by PARTIAL name match: '{emp.name}' (matched on '{part}')")
-                            # Store as active employee for this session
-                            active_employee_store[session_id] = emp.id
-                            logger.info(f"[CHAT] → Updated active employee for session")
+                            if candidate not in matching_employees:
+                                matching_employees.append(candidate)
+                                logger.info(f"[CHAT] ✓ Found employee by PARTIAL name match: '{candidate.name}' (ID: {candidate.id}, employee_id: {candidate.employee_id}, matched on '{part}')")
                             break
-                if emp:
-                    break
+
+        # Set emp to the first match (for backward compatibility), but keep track of all matches
+        if matching_employees:
+            emp = matching_employees[0]
+            active_employee_store[session_id] = emp.id
+            logger.info(f"[CHAT] → Found {len(matching_employees)} employee(s) matching the query")
+            if len(matching_employees) > 1:
+                logger.info(f"[CHAT] → DUPLICATE NAMES DETECTED: {[(e.name, e.employee_id) for e in matching_employees]}")
 
         # Step 2: If no employee mentioned in prompt, fall back to:
         # a) active_employee_store (session memory - MOST RECENTLY discussed employee)
@@ -1774,7 +2510,38 @@ async def chat(request: Request, req: ChatRequest | None = None):
                 history_text += "\n"
 
             # Build structured employee data from database fields
-            structured_data = f"""
+            # Handle duplicate names: include ALL matching employees
+            def build_employee_record(e):
+                return f"""
+--- Employee Record (Employee ID: {e.employee_id if hasattr(e, 'employee_id') and e.employee_id else 'N/A'}) ---
+Name: {e.name or 'N/A'}
+Email: {e.email or 'N/A'}
+Phone: {e.phone if hasattr(e, 'phone') and e.phone else 'N/A'}
+Department: {e.department if hasattr(e, 'department') and e.department else 'N/A'}
+Position: {e.position if hasattr(e, 'position') and e.position else 'N/A'}
+LinkedIn: {e.linkedin_url if hasattr(e, 'linkedin_url') and e.linkedin_url else 'N/A'}
+Portfolio: {e.portfolio_url if hasattr(e, 'portfolio_url') and e.portfolio_url else 'N/A'}
+GitHub: {e.github_url if hasattr(e, 'github_url') and e.github_url else 'N/A'}
+Career Objective: {e.career_objective[:200] if hasattr(e, 'career_objective') and e.career_objective else 'N/A'}
+Technical Skills: {e.technical_skills if hasattr(e, 'technical_skills') and e.technical_skills else 'N/A'}
+Education: {e.education if hasattr(e, 'education') and e.education else 'N/A'}
+Work Experience: {e.work_experience[:500] if hasattr(e, 'work_experience') and e.work_experience else 'N/A'}
+Languages: {e.languages if hasattr(e, 'languages') and e.languages else 'N/A'}
+Hobbies: {e.hobbies if hasattr(e, 'hobbies') and e.hobbies else 'N/A'}
+"""
+            # If there are multiple employees with the same name (duplicates), include ALL of them
+            employees_to_show = matching_employees if matching_employees and len(matching_employees) > 1 else [emp]
+
+            if len(employees_to_show) > 1:
+                structured_data = f"""
+=== MULTIPLE EMPLOYEE RECORDS FOUND ({len(employees_to_show)} employees with matching name) ===
+NOTE: There are {len(employees_to_show)} employees with similar names. Each record is shown with its unique Employee ID.
+"""
+                for e in employees_to_show:
+                    structured_data += build_employee_record(e)
+                structured_data += "================================\n"
+            else:
+                structured_data = f"""
 === EMPLOYEE DATABASE RECORD ===
 Employee ID: {emp.employee_id if hasattr(emp, 'employee_id') and emp.employee_id else 'N/A'}
 Name: {emp.name or 'N/A'}
@@ -1785,20 +2552,15 @@ Position: {emp.position if hasattr(emp, 'position') and emp.position else 'N/A'}
 LinkedIn: {emp.linkedin_url if hasattr(emp, 'linkedin_url') and emp.linkedin_url else 'N/A'}
 Portfolio: {emp.portfolio_url if hasattr(emp, 'portfolio_url') and emp.portfolio_url else 'N/A'}
 GitHub: {emp.github_url if hasattr(emp, 'github_url') and emp.github_url else 'N/A'}
-City: {emp.city if hasattr(emp, 'city') and emp.city else 'N/A'}
-Country: {emp.country if hasattr(emp, 'country') and emp.country else 'N/A'}
 Career Objective: {emp.career_objective[:200] if hasattr(emp, 'career_objective') and emp.career_objective else 'N/A'}
 Technical Skills: {emp.technical_skills if hasattr(emp, 'technical_skills') and emp.technical_skills else 'N/A'}
-Soft Skills: {emp.soft_skills if hasattr(emp, 'soft_skills') and emp.soft_skills else 'N/A'}
 Education: {emp.education if hasattr(emp, 'education') and emp.education else 'N/A'}
 Work Experience: {emp.work_experience[:500] if hasattr(emp, 'work_experience') and emp.work_experience else 'N/A'}
-Certifications: {emp.certifications if hasattr(emp, 'certifications') and emp.certifications else 'N/A'}
 Languages: {emp.languages if hasattr(emp, 'languages') and emp.languages else 'N/A'}
-Achievements: {emp.achievements if hasattr(emp, 'achievements') and emp.achievements else 'N/A'}
 Hobbies: {emp.hobbies if hasattr(emp, 'hobbies') and emp.hobbies else 'N/A'}
 ================================
 """
-            logger.info(f"[CHAT] → Built structured employee data block")
+            logger.info(f"[CHAT] → Built structured employee data block for {len(employees_to_show)} employee(s)")
 
             # Enhanced prompt with pronoun resolution and comprehensive hallucination prevention
             context_instruction = (
@@ -1845,66 +2607,73 @@ Hobbies: {emp.hobbies if hasattr(emp, 'hobbies') and emp.hobbies else 'N/A'}
             logger.info(f"[CHAT] → Final prompt length: {len(prompt)} chars")
         else:
             # =====================================================
-            # ANTI-HALLUCINATION GUARD #6: NO EMPLOYEE CONTEXT
-            # Instead of sending raw prompt to LLM (which causes hallucination),
-            # return a helpful message asking for clarification or offering options
+            # Check if LLM prompt was already prepared (e.g., for list queries)
+            # If so, skip this block and fall through to LLM call
             # =====================================================
-            logger.warning(f"[CHAT] ✗ NO EMPLOYEE CONTEXT - checking if employee-related query")
-
-            # Check if this is an employee-related query that needs context
-            employee_related_keywords = [
-                "employee", "record", "details", "info", "skills", "experience",
-                "email", "phone", "department", "resume", "cv", "candidate",
-                "their", "his", "her", "profile", "data", "position"
-            ]
-            is_employee_query = any(kw in prompt_lower for kw in employee_related_keywords)
-
-            if is_employee_query:
-                logger.info(f"[CHAT] → Employee-related query without context - returning guidance")
-
-                # Get available employees for the response
-                guidance_employees = db.query(models.Employee).all()
-                if guidance_employees:
-                    emp_names = [e.name for e in guidance_employees if e.name][:10]
-                    emp_list = ", ".join(emp_names) if emp_names else "No named employees"
-
-                    no_context_reply = (
-                        "I need to know which employee you're asking about.\n\n"
-                        f"**Available employees:** {emp_list}\n\n"
-                        "**You can:**\n"
-                        "- Ask about a specific person: \"Show me **John's** details\"\n"
-                        "- See all employees: \"List **all employees**\"\n"
-                        "- Upload a new CV to add an employee"
-                    )
-                else:
-                    no_context_reply = (
-                        "There are no employee records in the database yet.\n\n"
-                        "**To get started:**\n"
-                        "1. Upload a CV/resume using the file picker\n"
-                        "2. Wait for it to be processed\n"
-                        "3. Then you can ask questions about that employee"
-                    )
-
-                conversation_store[session_id].append({"role": "user", "content": req.prompt})
-                conversation_store[session_id].append({"role": "assistant", "content": no_context_reply})
-
-                return {
-                    "reply": no_context_reply,
-                    "session_id": session_id,
-                    "employee_id": None,
-                    "employee_name": None
-                }
+            if llm_prompt_prepared:
+                logger.info(f"[CHAT] → LLM prompt already prepared (list query), skipping no-context handler")
             else:
-                # Non-employee query - we can send to LLM but with strict instructions
-                logger.info(f"[CHAT] → Non-employee query, using general response mode")
-                prompt = (
-                    "You are an Employee Management System assistant. "
-                    "The user's query doesn't seem to be about a specific employee.\n\n"
-                    "IMPORTANT: Do NOT make up employee data. If asked about employees, "
-                    "tell them to specify which employee or ask to see all employees.\n\n"
-                    f"User Query: {req.prompt}\n\n"
-                    "Respond helpfully but DO NOT fabricate any employee information."
-                )
+                # =====================================================
+                # ANTI-HALLUCINATION GUARD #6: NO EMPLOYEE CONTEXT
+                # Instead of sending raw prompt to LLM (which causes hallucination),
+                # return a helpful message asking for clarification or offering options
+                # =====================================================
+                logger.warning(f"[CHAT] ✗ NO EMPLOYEE CONTEXT - checking if employee-related query")
+
+                # Check if this is an employee-related query that needs context
+                employee_related_keywords = [
+                    "employee", "record", "details", "info", "skills", "experience",
+                    "email", "phone", "department", "resume", "cv", "candidate",
+                    "their", "his", "her", "profile", "data", "position"
+                ]
+                is_employee_query = any(kw in prompt_lower for kw in employee_related_keywords)
+
+                if is_employee_query:
+                    logger.info(f"[CHAT] → Employee-related query without context - returning guidance")
+
+                    # Get available employees for the response
+                    guidance_employees = db.query(models.Employee).all()
+                    if guidance_employees:
+                        emp_names = [e.name for e in guidance_employees if e.name][:10]
+                        emp_list = ", ".join(emp_names) if emp_names else "No named employees"
+
+                        no_context_reply = (
+                            "I need to know which employee you're asking about.\n\n"
+                            f"**Available employees:** {emp_list}\n\n"
+                            "**You can:**\n"
+                            "- Ask about a specific person: \"Show me **John's** details\"\n"
+                            "- See all employees: \"List **all employees**\"\n"
+                            "- Upload a new CV to add an employee"
+                        )
+                    else:
+                        no_context_reply = (
+                            "There are no employee records in the database yet.\n\n"
+                            "**To get started:**\n"
+                            "1. Upload a CV/resume using the file picker\n"
+                            "2. Wait for it to be processed\n"
+                            "3. Then you can ask questions about that employee"
+                        )
+
+                    conversation_store[session_id].append({"role": "user", "content": req.prompt})
+                    conversation_store[session_id].append({"role": "assistant", "content": no_context_reply})
+
+                    return {
+                        "reply": no_context_reply,
+                        "session_id": session_id,
+                        "employee_id": None,
+                        "employee_name": None
+                    }
+                else:
+                    # Non-employee query - we can send to LLM but with strict instructions
+                    logger.info(f"[CHAT] → Non-employee query, using general response mode")
+                    prompt = (
+                        "You are an Employee Management System assistant. "
+                        "The user's query doesn't seem to be about a specific employee.\n\n"
+                        "IMPORTANT: Do NOT make up employee data. If asked about employees, "
+                        "tell them to specify which employee or ask to see all employees.\n\n"
+                        f"User Query: {req.prompt}\n\n"
+                        "Respond helpfully but DO NOT fabricate any employee information."
+                    )
     finally:
         db.close()
 
