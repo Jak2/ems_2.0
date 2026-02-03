@@ -738,7 +738,7 @@ async def chat(request: Request, req: ChatRequest | None = None):
     # Comprehensive action keywords for LIST/READ operations
     action_keywords = [
         "show", "show me", "display", "list", "get", "fetch", "give me",
-        "tell me", "what are", "what is", "what's", "let me see", "i want to see",
+        "tell me", "what", "what are", "what is", "what's", "let me see", "i want to see",
         "can you show", "could you show", "please show", "view", "see",
         "who are", "who is", "how many", "count", "total"
     ]
@@ -1360,9 +1360,13 @@ City: {emp.city if hasattr(emp, 'city') and emp.city else 'N/A'}
 Country: {emp.country if hasattr(emp, 'country') and emp.country else 'N/A'}
 Career Objective: {emp.career_objective[:200] if hasattr(emp, 'career_objective') and emp.career_objective else 'N/A'}
 Technical Skills: {emp.technical_skills if hasattr(emp, 'technical_skills') and emp.technical_skills else 'N/A'}
+Soft Skills: {emp.soft_skills if hasattr(emp, 'soft_skills') and emp.soft_skills else 'N/A'}
 Education: {emp.education if hasattr(emp, 'education') and emp.education else 'N/A'}
 Work Experience: {emp.work_experience[:500] if hasattr(emp, 'work_experience') and emp.work_experience else 'N/A'}
 Certifications: {emp.certifications if hasattr(emp, 'certifications') and emp.certifications else 'N/A'}
+Languages: {emp.languages if hasattr(emp, 'languages') and emp.languages else 'N/A'}
+Achievements: {emp.achievements if hasattr(emp, 'achievements') and emp.achievements else 'N/A'}
+Hobbies: {emp.hobbies if hasattr(emp, 'hobbies') and emp.hobbies else 'N/A'}
 ================================
 """
             logger.info(f"[CHAT] → Built structured employee data block")
