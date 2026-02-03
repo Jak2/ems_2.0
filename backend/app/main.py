@@ -333,42 +333,73 @@ def process_cv(file_id: str, filename: str, job_id: str):
                     pass
         except Exception:
             pass
-        # LLM-driven COMPREHENSIVE structured extraction
+        # LLM-driven COMPREHENSIVE structured extraction with intelligent parsing
         logger.info(f"[PROCESS_CV] → Starting LLM extraction...")
         try:
             extraction_prompt = (
-                "You are a professional resume parser. Extract ALL information from the resume into JSON format.\n\n"
-                "CRITICAL RULES:\n"
-                "1. Return ONLY valid JSON - no explanations\n"
-                "2. Use null for missing fields\n"
-                "3. Do NOT guess or infer - only extract what's explicitly stated\n"
-                "4. For arrays (work_experience, education, skills), use proper JSON arrays\n\n"
+                "You are an expert resume parser with deep analytical capabilities. Your task is to thoroughly analyze the ENTIRE resume and extract ALL information into JSON format.\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. READ THE ENTIRE RESUME CAREFULLY - information may be scattered across different sections\n"
+                "2. AGGREGATE SKILLS FROM EVERYWHERE - collect technical skills mentioned in:\n"
+                "   - Dedicated skills sections\n"
+                "   - Work experience descriptions (e.g., 'worked with Python and AWS')\n"
+                "   - Project descriptions\n"
+                "   - Certifications (e.g., 'AWS Certified' implies AWS skill)\n"
+                "   - Education (e.g., 'coursework in Machine Learning')\n"
+                "   - Summary/objective sections\n"
+                "   List EVERY unique skill you find - do not limit the count!\n\n"
+                "3. CALCULATE TOTAL EXPERIENCE:\n"
+                "   - If total experience is explicitly stated, use that value\n"
+                "   - If NOT explicitly stated, CALCULATE it by adding up all work durations\n"
+                "   - Example: 'Jan 2020 - Dec 2022' = ~3 years, 'Feb 2018 - Dec 2019' = ~2 years, Total = ~5 years\n"
+                "   - Include this in the 'summary' field as 'Total Experience: X years Y months'\n\n"
+                "4. INFER DEPARTMENT from job titles/roles:\n"
+                "   - 'Software Engineer', 'Developer', 'QA' -> 'Engineering/IT'\n"
+                "   - 'Scrum Master', 'Project Manager' -> 'Project Management'\n"
+                "   - 'HR Manager', 'Recruiter' -> 'Human Resources'\n\n"
+                "5. EXTRACT POSITION as the most recent/current job title\n\n"
+                "6. Return ONLY valid JSON - no explanations before or after\n"
+                "7. Use null for fields with no information found\n"
+                "8. For arrays, include ALL items found - do not truncate or limit\n\n"
                 "Required JSON structure:\n"
                 "{\n"
                 '  "name": "Full name",\n'
                 '  "email": "email@example.com",\n'
                 '  "phone": "+1-234-567-8900",\n'
-                '  "linkedin_url": "https://linkedin.com/in/...",\n'
-                '  "portfolio_url": "https://...",\n'
-                '  "github_url": "https://github.com/...",\n'
-                '  "department": "IT/HR/Engineering/etc",\n'
-                '  "position": "Job title",\n'
-                '  "career_objective": "Career objective/summary text",\n'
-                '  "summary": "Professional summary",\n'
-                '  "work_experience": ["Company: XYZ, Role: Engineer, Duration: 2020-2023, Responsibilities: ..."],\n'
-                '  "education": ["Degree: BS Computer Science, University: MIT, Year: 2020, GPA: 3.8"],\n'
-                '  "technical_skills": ["Python", "Java", "React", "AWS"],\n'
-                '  "soft_skills": ["Leadership", "Communication"],\n'
-                '  "languages": ["English (Native)", "Spanish (Fluent)"],\n'
-                '  "certifications": ["AWS Certified", "PMP"],\n'
-                '  "achievements": ["Won hackathon", "Published paper"],\n'
-                '  "hobbies": ["Photography", "Hiking"],\n'
-                '  "cocurricular_activities": ["President of CS Club"],\n'
-                '  "address": "Full address",\n'
+                '  "linkedin_url": "LinkedIn profile URL or null",\n'
+                '  "portfolio_url": "Portfolio/website URL or null",\n'
+                '  "github_url": "GitHub profile URL or null",\n'
+                '  "department": "Inferred department based on role",\n'
+                '  "position": "Most recent/current job title",\n'
+                '  "career_objective": "Career objective if stated",\n'
+                '  "summary": "Professional summary INCLUDING calculated total experience (e.g., Total Experience: 12 years 4 months)",\n'
+                '  "work_experience": [\n'
+                '    {"company": "Company Name", "role": "Job Title", "duration": "Start - End", "duration_months": 24, "responsibilities": "Key responsibilities..."}\n'
+                '  ],\n'
+                '  "education": [\n'
+                '    {"degree": "Degree Name", "field": "Field of Study", "institution": "University Name", "year": "Graduation Year", "grade": "GPA/Percentage"}\n'
+                '  ],\n'
+                '  "technical_skills": ["EVERY technical skill found ANYWHERE in the resume - tools, technologies, programming languages, frameworks, platforms, methodologies like Agile/Scrum, testing tools, etc."],\n'
+                '  "soft_skills": ["Leadership", "Communication", "Team Management", "Problem Solving", etc.],\n'
+                '  "languages": ["English (Proficiency)", "Spanish (Level)", etc.],\n'
+                '  "certifications": ["Full certification name with year if available"],\n'
+                '  "achievements": ["All achievements, awards, recognitions mentioned"],\n'
+                '  "hobbies": ["Hobbies and interests if mentioned"],\n'
+                '  "cocurricular_activities": ["Extracurricular activities, volunteering, clubs"],\n'
+                '  "address": "Full address if provided",\n'
                 '  "city": "City name",\n'
                 '  "country": "Country name"\n'
                 "}\n\n"
-                f"Resume text:\n\n{pdf_text[:8000]}\n\n"
+                "IMPORTANT: For technical_skills, scan the ENTIRE resume and list EVERY skill including:\n"
+                "- Programming languages (Python, Java, C++, etc.)\n"
+                "- Frameworks (React, Angular, Django, etc.)\n"
+                "- Tools (Jira, Selenium, Jenkins, Git, etc.)\n"
+                "- Cloud platforms (AWS, Azure, GCP)\n"
+                "- Databases (MySQL, MongoDB, PostgreSQL)\n"
+                "- Methodologies (Agile, Scrum, DevOps, CI/CD)\n"
+                "- Testing tools and frameworks\n"
+                "- Any other technical competency mentioned\n\n"
+                f"Resume text:\n\n{pdf_text[:12000]}\n\n"
                 "JSON output:"
             )
             # write prompt log for this job
@@ -495,12 +526,18 @@ def process_cv(file_id: str, filename: str, job_id: str):
                 try:
                     retry_prompt = (
                         "CRITICAL: Extract resume data as STRICT JSON only. NO explanations.\n\n"
+                        "IMPORTANT RULES:\n"
+                        "1. Find the person's NAME - look at the top of the resume\n"
+                        "2. AGGREGATE ALL SKILLS from everywhere in the resume (work experience, projects, certifications)\n"
+                        "3. CALCULATE total experience by adding up all job durations if not explicitly stated\n"
+                        "4. Include calculated experience in 'summary' as 'Total Experience: X years Y months'\n\n"
                         "Return JSON with these keys (use null if not found):\n"
                         "name, email, phone, linkedin_url, portfolio_url, github_url, department, position, "
-                        "career_objective, summary, work_experience, education, technical_skills, soft_skills, "
+                        "career_objective, summary, work_experience, education, technical_skills (LIST ALL SKILLS!), soft_skills, "
                         "languages, certifications, achievements, hobbies, cocurricular_activities, address, city, country\n\n"
-                        "Arrays must use JSON array format: [\"item1\", \"item2\"]\n\n"
-                        f"Resume:\n\n{pdf_text[:8000]}\n\nJSON:"
+                        "Arrays must use JSON array format: [\"item1\", \"item2\"]\n"
+                        "For technical_skills, include EVERY skill mentioned anywhere: programming languages, tools, frameworks, platforms, methodologies.\n\n"
+                        f"Resume:\n\n{pdf_text[:12000]}\n\nJSON:"
                     )
                     # write retry prompt log
                     try:
@@ -692,6 +729,398 @@ async def chat(request: Request, req: ChatRequest | None = None):
     conversation_history = list(conversation_store[session_id])
     logger.info(f"[CHAT] Conversation history: {len(conversation_history)} messages")
 
+    # =====================================================
+    # RESUME-BASED CREATE DETECTION
+    # Pattern: "create <resume content>" where content is substantial (>100 chars)
+    # This allows users to paste resume data directly and create an employee record
+    # =====================================================
+    prompt_lower = prompt.lower()
+    is_resume_create = False
+    resume_content = ""
+
+    if prompt_lower.strip().startswith("create "):
+        potential_resume = prompt[len("create "):].strip()
+        # If the content after "create" is substantial (>100 chars), treat as resume data
+        if len(potential_resume) > 100:
+            is_resume_create = True
+            resume_content = potential_resume
+            logger.info(f"[CHAT] → Detected RESUME CREATE command ({len(resume_content)} chars)")
+
+    # Handle resume-based employee creation
+    if is_resume_create:
+        logger.info(f"[CHAT] → Processing resume-based employee creation")
+
+        from sqlalchemy.orm import Session
+        from sqlalchemy import text as sql_text
+        import json as _json
+        import re
+
+        db: Session = SessionLocal()
+        try:
+            # Generate employee_id in format 013449 (6 digits, zero-padded)
+            try:
+                result = db.execute(sql_text(
+                    "SELECT COALESCE(MAX(CAST(employee_id AS INTEGER)), 0) + 1 FROM employees WHERE employee_id IS NOT NULL"
+                )).scalar()
+                next_id = result if result else 1
+            except Exception as e:
+                logger.warning(f"[CHAT] Could not get max employee_id: {e}")
+                count = db.query(models.Employee).count()
+                next_id = count + 1
+
+            employee_id = str(next_id).zfill(6)
+            logger.info(f"[CHAT] Generated employee_id: {employee_id}")
+
+            # Create initial Employee record
+            emp = models.Employee(
+                employee_id=employee_id,
+                name="Pending extraction...",
+                raw_text=resume_content,
+                extracted_text=resume_content
+            )
+            db.add(emp)
+            db.commit()
+            db.refresh(emp)
+            logger.info(f"[CHAT] Created initial employee record: ID={emp.id}, employee_id={emp.employee_id}")
+
+            # Add to FAISS vector store
+            try:
+                def chunk_text(s: str, chunk_size: int = 500, overlap: int = 100):
+                    s = s or ""
+                    chunks = []
+                    i = 0
+                    L = len(s)
+                    while i < L:
+                        chunk = s[i: i + chunk_size]
+                        chunks.append(chunk)
+                        i += chunk_size - overlap
+                    return chunks
+
+                chunks = chunk_text(resume_content, chunk_size=500, overlap=100)
+                if chunks:
+                    vectorstore.add_chunks(emp.id, chunks)
+                    logger.info(f"[CHAT] Added {len(chunks)} chunks to FAISS vector store")
+            except Exception as e:
+                logger.warning(f"[CHAT] Failed to add to FAISS: {e}")
+
+            # Use comprehensive extraction prompt with intelligent parsing
+            extraction_prompt = (
+                "You are an expert resume parser with deep analytical capabilities. Your task is to thoroughly analyze the ENTIRE resume and extract ALL information into JSON format.\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. READ THE ENTIRE RESUME CAREFULLY - information may be scattered across different sections\n"
+                "2. AGGREGATE SKILLS FROM EVERYWHERE - collect technical skills mentioned in:\n"
+                "   - Dedicated skills sections\n"
+                "   - Work experience descriptions (e.g., 'worked with Python and AWS')\n"
+                "   - Project descriptions\n"
+                "   - Certifications (e.g., 'AWS Certified' implies AWS skill)\n"
+                "   - Education (e.g., 'coursework in Machine Learning')\n"
+                "   - Summary/objective sections\n"
+                "   List EVERY unique skill you find - do not limit the count!\n\n"
+                "3. CALCULATE TOTAL EXPERIENCE:\n"
+                "   - If total experience is explicitly stated, use that value\n"
+                "   - If NOT explicitly stated, CALCULATE it by adding up all work durations\n"
+                "   - Example: 'Jan 2020 - Dec 2022' = ~3 years, 'Feb 2018 - Dec 2019' = ~2 years, Total = ~5 years\n"
+                "   - Include this in the 'summary' field as 'Total Experience: X years Y months'\n\n"
+                "4. INFER DEPARTMENT from job titles/roles:\n"
+                "   - 'Software Engineer', 'Developer', 'QA' -> 'Engineering/IT'\n"
+                "   - 'Scrum Master', 'Project Manager' -> 'Project Management'\n"
+                "   - 'HR Manager', 'Recruiter' -> 'Human Resources'\n\n"
+                "5. EXTRACT POSITION as the most recent/current job title\n\n"
+                "6. Return ONLY valid JSON - no explanations before or after\n"
+                "7. Use null for fields with no information found\n"
+                "8. For arrays, include ALL items found - do not truncate or limit\n\n"
+                "Required JSON structure:\n"
+                "{\n"
+                '  "name": "Full name",\n'
+                '  "email": "email@example.com",\n'
+                '  "phone": "+1-234-567-8900",\n'
+                '  "linkedin_url": "LinkedIn profile URL or null",\n'
+                '  "portfolio_url": "Portfolio/website URL or null",\n'
+                '  "github_url": "GitHub profile URL or null",\n'
+                '  "department": "Inferred department based on role",\n'
+                '  "position": "Most recent/current job title",\n'
+                '  "career_objective": "Career objective if stated",\n'
+                '  "summary": "Professional summary INCLUDING calculated total experience (e.g., Total Experience: 12 years 4 months)",\n'
+                '  "work_experience": [\n'
+                '    {"company": "Company Name", "role": "Job Title", "duration": "Start - End", "duration_months": 24, "responsibilities": "Key responsibilities..."}\n'
+                '  ],\n'
+                '  "education": [\n'
+                '    {"degree": "Degree Name", "field": "Field of Study", "institution": "University Name", "year": "Graduation Year", "grade": "GPA/Percentage"}\n'
+                '  ],\n'
+                '  "technical_skills": ["EVERY technical skill found ANYWHERE in the resume - tools, technologies, programming languages, frameworks, platforms, methodologies like Agile/Scrum, testing tools, etc."],\n'
+                '  "soft_skills": ["Leadership", "Communication", "Team Management", "Problem Solving", etc.],\n'
+                '  "languages": ["English (Proficiency)", "Spanish (Level)", etc.],\n'
+                '  "certifications": ["Full certification name with year if available"],\n'
+                '  "achievements": ["All achievements, awards, recognitions mentioned"],\n'
+                '  "hobbies": ["Hobbies and interests if mentioned"],\n'
+                '  "cocurricular_activities": ["Extracurricular activities, volunteering, clubs"],\n'
+                '  "address": "Full address if provided",\n'
+                '  "city": "City name",\n'
+                '  "country": "Country name"\n'
+                "}\n\n"
+                "IMPORTANT: For technical_skills, scan the ENTIRE resume and list EVERY skill including:\n"
+                "- Programming languages (Python, Java, C++, etc.)\n"
+                "- Frameworks (React, Angular, Django, etc.)\n"
+                "- Tools (Jira, Selenium, Jenkins, Git, etc.)\n"
+                "- Cloud platforms (AWS, Azure, GCP)\n"
+                "- Databases (MySQL, MongoDB, PostgreSQL)\n"
+                "- Methodologies (Agile, Scrum, DevOps, CI/CD)\n"
+                "- Testing tools and frameworks\n"
+                "- Any other technical competency mentioned\n\n"
+                f"Resume text:\n\n{resume_content[:12000]}\n\n"
+                "JSON output:"
+            )
+
+            logger.info(f"[CHAT] → Sending extraction prompt to LLM ({len(extraction_prompt)} chars)...")
+            extraction_resp = llm.generate(extraction_prompt)
+            logger.info(f"[CHAT] ✓ LLM response received: {len(extraction_resp)} chars")
+
+            # Parse JSON from response
+            parsed = None
+            try:
+                parsed = _json.loads(extraction_resp)
+                logger.info(f"[CHAT] ✓ JSON parsed directly from LLM response")
+            except Exception as e:
+                logger.warning(f"[CHAT] ✗ Direct JSON parse failed: {e}")
+                m = re.search(r"\{.*\}", extraction_resp, re.S)
+                if m:
+                    try:
+                        parsed = _json.loads(m.group(0))
+                        logger.info(f"[CHAT] ✓ JSON extracted from substring")
+                    except Exception as e2:
+                        logger.error(f"[CHAT] ✗ JSON substring parse also failed: {e2}")
+                        parsed = None
+
+            # Validate using Pydantic model
+            from pydantic import BaseModel as PydanticBase, ValidationError, field_validator
+            from typing import List, Any
+
+            class ComprehensiveExtractionModel(PydanticBase):
+                name: str | None = None
+                email: str | None = None
+                phone: str | None = None
+                linkedin_url: str | None = None
+                portfolio_url: str | None = None
+                github_url: str | None = None
+                department: str | None = None
+                position: str | None = None
+                career_objective: str | None = None
+                summary: str | None = None
+                work_experience: List[Any] | None = None
+                education: List[Any] | None = None
+                technical_skills: List[Any] | None = None
+                soft_skills: List[Any] | None = None
+                languages: List[Any] | None = None
+                certifications: List[Any] | None = None
+                achievements: List[Any] | None = None
+                hobbies: List[Any] | None = None
+                cocurricular_activities: List[Any] | None = None
+                address: str | None = None
+                city: str | None = None
+                country: str | None = None
+
+                @field_validator('work_experience', 'education', 'technical_skills', 'soft_skills',
+                               'languages', 'certifications', 'achievements', 'hobbies',
+                               'cocurricular_activities', mode='before')
+                @classmethod
+                def convert_dicts_to_strings(cls, v):
+                    if v is None:
+                        return None
+                    if isinstance(v, list):
+                        result = []
+                        for item in v:
+                            if isinstance(item, dict):
+                                result.append(_json.dumps(item, ensure_ascii=False))
+                            else:
+                                result.append(str(item) if item is not None else None)
+                        return result
+                    return v
+
+            parsed_model = None
+            if isinstance(parsed, dict):
+                try:
+                    parsed_model = ComprehensiveExtractionModel(**parsed)
+                    logger.info(f"[CHAT] ✓ Pydantic validation passed, name: '{parsed_model.name}'")
+                except ValidationError as ve:
+                    logger.warning(f"[CHAT] ✗ Validation error: {ve}")
+                    parsed_model = None
+
+            # Retry if name is missing
+            if not parsed_model or not parsed_model.name:
+                logger.warning(f"[CHAT] → Name not found, trying retry prompt...")
+                try:
+                    retry_prompt = (
+                        "CRITICAL: Extract resume data as STRICT JSON only. NO explanations.\n\n"
+                        "IMPORTANT RULES:\n"
+                        "1. Find the person's NAME - look at the beginning of the text\n"
+                        "2. AGGREGATE ALL SKILLS from everywhere in the resume (work experience, projects, certifications)\n"
+                        "3. CALCULATE total experience by adding up all job durations if not explicitly stated\n"
+                        "4. Include calculated experience in 'summary' as 'Total Experience: X years Y months'\n\n"
+                        "Return JSON with these keys (use null if not found):\n"
+                        "name, email, phone, linkedin_url, portfolio_url, github_url, department, position, "
+                        "career_objective, summary, work_experience, education, technical_skills (LIST ALL SKILLS!), soft_skills, "
+                        "languages, certifications, achievements, hobbies, cocurricular_activities, address, city, country\n\n"
+                        "Arrays must use JSON array format: [\"item1\", \"item2\"]\n"
+                        "For technical_skills, include EVERY skill mentioned anywhere: programming languages, tools, frameworks, platforms, methodologies.\n\n"
+                        f"Resume:\n\n{resume_content[:12000]}\n\nJSON:"
+                    )
+                    retry_resp = llm.generate(retry_prompt)
+                    parsed2 = None
+                    try:
+                        parsed2 = _json.loads(retry_resp)
+                    except Exception:
+                        m2 = re.search(r"\{.*\}", retry_resp, re.S)
+                        if m2:
+                            try:
+                                parsed2 = _json.loads(m2.group(0))
+                            except Exception:
+                                parsed2 = None
+                    if isinstance(parsed2, dict):
+                        try:
+                            parsed_model = ComprehensiveExtractionModel(**parsed2)
+                            logger.info(f"[CHAT] ✓ Retry successful, name: '{parsed_model.name}'")
+                        except ValidationError:
+                            pass
+                except Exception as e:
+                    logger.error(f"[CHAT] Retry extraction failed: {e}")
+
+            # Update employee with extracted fields
+            if parsed_model:
+                def safe_set(obj, attr, value):
+                    if value is not None:
+                        try:
+                            if isinstance(value, list):
+                                value = _json.dumps(value, ensure_ascii=False)
+                            setattr(obj, attr, value)
+                            logger.info(f"[CHAT] → Set {attr} = '{str(value)[:50]}{'...' if len(str(value)) > 50 else ''}'")
+                        except Exception as e:
+                            logger.warning(f"[CHAT] ✗ Could not set {attr}: {e}")
+
+                safe_set(emp, "name", parsed_model.name)
+                safe_set(emp, "email", parsed_model.email)
+                safe_set(emp, "phone", parsed_model.phone)
+                safe_set(emp, "linkedin_url", parsed_model.linkedin_url)
+                safe_set(emp, "portfolio_url", parsed_model.portfolio_url)
+                safe_set(emp, "github_url", parsed_model.github_url)
+                safe_set(emp, "department", parsed_model.department)
+                safe_set(emp, "position", parsed_model.position)
+                safe_set(emp, "career_objective", parsed_model.career_objective)
+                safe_set(emp, "summary", parsed_model.summary)
+                safe_set(emp, "work_experience", parsed_model.work_experience)
+                safe_set(emp, "education", parsed_model.education)
+                safe_set(emp, "technical_skills", parsed_model.technical_skills)
+                safe_set(emp, "soft_skills", parsed_model.soft_skills)
+                safe_set(emp, "languages", parsed_model.languages)
+                safe_set(emp, "certifications", parsed_model.certifications)
+                safe_set(emp, "achievements", parsed_model.achievements)
+                safe_set(emp, "hobbies", parsed_model.hobbies)
+                safe_set(emp, "cocurricular_activities", parsed_model.cocurricular_activities)
+                safe_set(emp, "address", parsed_model.address)
+                safe_set(emp, "city", parsed_model.city)
+                safe_set(emp, "country", parsed_model.country)
+
+                db.add(emp)
+                db.commit()
+                logger.info(f"[CHAT] ✓ Updated employee with extracted data: name='{emp.name}'")
+
+                # Save extracted JSON to MongoDB and local file
+                try:
+                    extracted_json = {
+                        "name": parsed_model.name,
+                        "email": parsed_model.email,
+                        "phone": parsed_model.phone,
+                        "linkedin_url": parsed_model.linkedin_url,
+                        "portfolio_url": parsed_model.portfolio_url,
+                        "github_url": parsed_model.github_url,
+                        "department": parsed_model.department,
+                        "position": parsed_model.position,
+                        "career_objective": parsed_model.career_objective,
+                        "summary": parsed_model.summary,
+                        "work_experience": parsed_model.work_experience,
+                        "education": parsed_model.education,
+                        "technical_skills": parsed_model.technical_skills,
+                        "soft_skills": parsed_model.soft_skills,
+                        "languages": parsed_model.languages,
+                        "certifications": parsed_model.certifications,
+                        "achievements": parsed_model.achievements,
+                        "hobbies": parsed_model.hobbies,
+                        "cocurricular_activities": parsed_model.cocurricular_activities,
+                        "address": parsed_model.address,
+                        "city": parsed_model.city,
+                        "country": parsed_model.country,
+                        "raw_text_preview": resume_content[:1000] if resume_content else None
+                    }
+                    doc_id = storage.save_extracted_data(emp.employee_id, f"chat_created_{emp.employee_id}.txt", extracted_json)
+                    logger.info(f"[CHAT] ✓ Saved extracted JSON: {doc_id}")
+                except Exception as e:
+                    logger.warning(f"[CHAT] ✗ Failed to save extracted JSON: {e}")
+
+                # Build success response
+                work_exp_count = len(parsed_model.work_experience) if parsed_model.work_experience else 0
+                edu_count = len(parsed_model.education) if parsed_model.education else 0
+                skills_count = len(parsed_model.technical_skills) if parsed_model.technical_skills else 0
+                certs_count = len(parsed_model.certifications) if parsed_model.certifications else 0
+
+                success_reply = (
+                    f"**Employee Created Successfully!**\n\n"
+                    f"- **Employee ID:** {emp.employee_id}\n"
+                    f"- **Name:** {emp.name or 'N/A'}\n"
+                    f"- **Email:** {emp.email or 'N/A'}\n"
+                    f"- **Phone:** {emp.phone or 'N/A'}\n"
+                    f"- **Position:** {emp.position or 'N/A'}\n"
+                    f"- **City:** {emp.city or 'N/A'}\n"
+                    f"- **Country:** {emp.country or 'N/A'}\n\n"
+                    f"**Extracted Data:**\n"
+                    f"- Work Experience: {work_exp_count} entries\n"
+                    f"- Education: {edu_count} entries\n"
+                    f"- Technical Skills: {skills_count} skills\n"
+                    f"- Certifications: {certs_count} certifications\n\n"
+                    f"The employee record has been added to both the SQL database and vector store."
+                )
+
+                conversation_store[session_id].append({"role": "user", "content": req.prompt})
+                conversation_store[session_id].append({"role": "assistant", "content": success_reply})
+
+                return {
+                    "reply": success_reply,
+                    "session_id": session_id,
+                    "employee_id": emp.id,
+                    "employee_name": emp.name
+                }
+            else:
+                # Extraction failed but record was created with raw text
+                error_reply = (
+                    f"**Employee Record Created (Partial)**\n\n"
+                    f"- **Employee ID:** {emp.employee_id}\n\n"
+                    f"The resume text was saved, but automatic extraction failed. "
+                    f"The raw text has been stored and indexed for search.\n\n"
+                    f"You can update the employee details manually using commands like:\n"
+                    f"- \"Update employee {emp.employee_id} name to John Doe\"\n"
+                    f"- \"Update employee {emp.employee_id} email to john@example.com\""
+                )
+
+                conversation_store[session_id].append({"role": "user", "content": req.prompt})
+                conversation_store[session_id].append({"role": "assistant", "content": error_reply})
+
+                return {
+                    "reply": error_reply,
+                    "session_id": session_id,
+                    "employee_id": emp.id,
+                    "employee_name": None
+                }
+
+        except Exception as e:
+            logger.exception(f"[CHAT] ✗ Resume create failed: {e}")
+            error_reply = f"Failed to create employee from resume data: {str(e)}"
+            return {
+                "reply": error_reply,
+                "session_id": session_id,
+                "employee_id": None,
+                "employee_name": None
+            }
+        finally:
+            db.close()
+
     # Detect if this is a CRUD command and route accordingly
     crud_keywords = ["update", "delete", "remove", "create", "add", "change", "modify", "set"]
     is_crud = any(keyword in prompt.lower() for keyword in crud_keywords)
@@ -732,7 +1161,7 @@ async def chat(request: Request, req: ChatRequest | None = None):
     # doesn't specify which one or "all"), ask for clarification instead
     # of letting the LLM hallucinate fake data.
     # =====================================================
-    prompt_lower = prompt.lower()
+    # Note: prompt_lower is already defined at the beginning of this function
     word_count = len(prompt_lower.split())
 
     # Comprehensive action keywords for LIST/READ operations
