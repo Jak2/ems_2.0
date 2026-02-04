@@ -7,6 +7,7 @@ import Upload from "./Upload"
 
 export default function App() {
   const [messages, setMessages] = useState([])
+  const [isLoading, setIsLoading] = useState(false)
   const chatRef = useRef(null)
 
   // Smooth-scroll the chat container to the absolute bottom to show the
@@ -34,6 +35,12 @@ export default function App() {
   return (
     <div className="container">
       <h1 className="app-title">ChatBot</h1>
+      {/* Loading progress bar - 2px thin bar at top of chat */}
+      {isLoading && (
+        <div className="loading-bar-container">
+          <div className="loading-bar"></div>
+        </div>
+      )}
       <div className="chat" ref={chatRef}>
         {messages.slice().reverse().map((m, i) => {
           // m is an object: { type: 'user'|'assistant'|'info'|'error', text, filename? }
@@ -86,7 +93,10 @@ export default function App() {
           )
         })}
       </div>
-      <Upload onNewMessage={(m) => setMessages((s) => [m, ...s])} />
+      <Upload
+        onNewMessage={(m) => setMessages((s) => [m, ...s])}
+        onLoadingChange={setIsLoading}
+      />
     </div>
   )
 }

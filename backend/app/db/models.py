@@ -27,11 +27,8 @@ class Employee(Base):
 
     # Online Presence
     linkedin_url = Column(String(512), nullable=True)
-    portfolio_url = Column(String(512), nullable=True)
-    github_url = Column(String(512), nullable=True)
 
     # Career Information (TEXT for longer content)
-    career_objective = Column(Text, nullable=True)
     summary = Column(Text, nullable=True)
 
     # Experience & Education (JSON/TEXT - structured data)

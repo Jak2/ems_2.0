@@ -2,16 +2,23 @@ import React, { useState, useRef } from "react"
 
 // Upload component: handles PDF selection and upload, polls job status,
 // and sends chat prompts (including employee_id when available).
-export default function Upload({ onNewMessage }) {
+export default function Upload({ onNewMessage, onLoadingChange }) {
   const [files, setFiles] = useState([])  // Changed to array for multiple files
   const [prompt, setPrompt] = useState("")
   const [status, setStatus] = useState("")
   const [employeeId, setEmployeeId] = useState(null)
-  const [isProcessing, setIsProcessing] = useState(false)
+  const [isProcessingState, setIsProcessingState] = useState(false)
   const [sessionId, setSessionId] = useState(null)  // For conversation memory
   const abortControllerRef = useRef(null)  // For canceling requests
   const requestStartTimeRef = useRef(null)  // For tracking response time
   const textareaRef = useRef(null)  // For auto-resize textarea
+
+  // Wrapper to update both local state and parent loading bar state
+  const setIsProcessing = (value) => {
+    setIsProcessingState(value)
+    if (onLoadingChange) onLoadingChange(value)
+  }
+  const isProcessing = isProcessingState
   // file selection is done via the input below; we no longer expose a separate
   // "Upload" button. The selected file will be uploaded automatically when the
   // user presses Send. This simplifies the UX as requested.

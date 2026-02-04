@@ -52,7 +52,8 @@ class OllamaAdapter:
                 "stream": False,
                 "options": {
                     "temperature": temp,
-                    "num_predict": 4096,  # Allow longer outputs for complete extraction
+                    "num_predict": 2048,  # Reduced for faster responses (was 4096)
+                    "num_ctx": 4096,  # Limit context window for faster processing
                     "seed": 42,  # Fixed seed for reproducibility
                 }
             }

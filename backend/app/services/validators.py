@@ -176,6 +176,179 @@ def validate_input_length(text: str, field_name: str = "resume") -> ValidationRe
     )
 
 
+def validate_is_resume(text: str) -> ValidationResult:
+    """Validate if the uploaded document is a resume/CV.
+
+    Checks for common resume indicators:
+    - Resume/CV keywords (experience, education, skills, etc.)
+    - Contact information patterns (email, phone)
+    - Structural patterns typical of resumes
+    - Minimum keyword threshold to confirm it's a resume
+
+    Args:
+        text: Extracted text from the uploaded document
+
+    Returns:
+        ValidationResult with is_valid=True if document is a resume
+    """
+    if not text or len(text.strip()) < 50:
+        return ValidationResult(
+            is_valid=False,
+            value=text,
+            errors=["Document is too short or empty to be a valid resume"],
+            confidence=0.0
+        )
+
+    text_lower = text.lower()
+    errors = []
+    warnings = []
+    score = 0
+    max_score = 100
+
+    # =====================================================
+    # RESUME KEYWORD DETECTION
+    # =====================================================
+
+    # Category 1: Section headers commonly found in resumes (high weight)
+    section_keywords = [
+        "experience", "work experience", "employment history", "professional experience",
+        "education", "academic background", "qualifications",
+        "skills", "technical skills", "core competencies", "expertise",
+        "objective", "career objective", "professional summary", "summary",
+        "certifications", "certificates", "licenses",
+        "projects", "achievements", "accomplishments",
+        "references", "awards", "publications"
+    ]
+    section_matches = sum(1 for kw in section_keywords if kw in text_lower)
+    if section_matches >= 3:
+        score += 35
+    elif section_matches >= 2:
+        score += 25
+    elif section_matches >= 1:
+        score += 15
+
+    # Category 2: Professional/career terms (medium weight)
+    professional_keywords = [
+        "resume", "cv", "curriculum vitae",
+        "job", "position", "role", "responsibilities",
+        "employer", "company", "organization",
+        "manager", "engineer", "developer", "analyst", "consultant",
+        "worked", "managed", "developed", "led", "implemented",
+        "years of experience", "years experience"
+    ]
+    professional_matches = sum(1 for kw in professional_keywords if kw in text_lower)
+    if professional_matches >= 4:
+        score += 25
+    elif professional_matches >= 2:
+        score += 15
+    elif professional_matches >= 1:
+        score += 8
+
+    # Category 3: Contact information patterns (medium weight)
+    # Note: Use patterns WITHOUT anchors for searching within text
+    # The PATTERNS dict uses ^...$ anchors which only match the entire string
+    email_search_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+    phone_search_pattern = re.compile(r'[\+]?[\d\s\-\.\(\)]{10,20}')
+    has_email = bool(email_search_pattern.search(text))
+    has_phone = bool(phone_search_pattern.search(text))
+
+    if has_email:
+        score += 15
+    if has_phone:
+        score += 10
+
+    # Category 4: Date patterns typical in resumes (low weight)
+    date_patterns = [
+        r'\b(19|20)\d{2}\s*[-–]\s*(19|20)\d{2}\b',  # 2018-2020
+        r'\b(19|20)\d{2}\s*[-–]\s*(present|current|now)\b',  # 2020-Present
+        r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*(19|20)\d{2}\b',  # Jan 2020
+    ]
+    date_matches = sum(1 for pattern in date_patterns if re.search(pattern, text_lower))
+    if date_matches >= 2:
+        score += 15
+    elif date_matches >= 1:
+        score += 8
+
+    # =====================================================
+    # NON-RESUME DOCUMENT DETECTION (negative indicators)
+    # =====================================================
+
+    # Check for non-resume document types
+    non_resume_indicators = [
+        ("invoice", "invoice"),
+        ("receipt", "receipt"),
+        ("contract", "legal contract"),
+        ("agreement", "agreement document"),
+        ("bill", "billing document"),
+        ("statement", "bank/financial statement"),
+        ("report", "report document"),
+        ("meeting minutes", "meeting minutes"),
+        ("memo", "memorandum"),
+        ("policy", "policy document"),
+        ("manual", "user manual"),
+        ("instructions", "instruction document"),
+        ("letter of recommendation", "recommendation letter"),
+        ("cover letter", "cover letter (not a resume)")
+    ]
+
+    for indicator, doc_type in non_resume_indicators:
+        # Only flag if it appears prominently (in title or multiple times)
+        indicator_count = text_lower.count(indicator)
+        if indicator_count >= 3 or (indicator in text_lower[:200] and section_matches < 2):
+            score -= 20
+            warnings.append(f"Document may be a {doc_type} rather than a resume")
+
+    # =====================================================
+    # FINAL SCORING AND DECISION
+    # =====================================================
+
+    # Calculate confidence
+    confidence = min(max(score / max_score, 0.0), 1.0)
+
+    # Threshold for accepting as resume
+    RESUME_THRESHOLD = 40  # Minimum score to be considered a resume
+
+    if score < RESUME_THRESHOLD:
+        # Build helpful error message
+        missing = []
+        if section_matches < 2:
+            missing.append("resume sections (experience, education, skills)")
+        if not has_email and not has_phone:
+            missing.append("contact information (email or phone)")
+        if professional_matches < 2:
+            missing.append("professional/career-related content")
+
+        error_msg = "The uploaded document does not appear to be a resume/CV. "
+        if missing:
+            error_msg += f"Missing: {', '.join(missing)}. "
+        error_msg += "Please upload a valid resume document."
+
+        errors.append(error_msg)
+
+        logger.warning(f"[VALIDATOR] Document rejected as non-resume. Score: {score}/{max_score}, "
+                      f"Sections: {section_matches}, Professional: {professional_matches}, "
+                      f"Email: {has_email}, Phone: {has_phone}")
+
+        return ValidationResult(
+            is_valid=False,
+            value=text,
+            errors=errors,
+            warnings=warnings,
+            confidence=confidence
+        )
+
+    logger.info(f"[VALIDATOR] Document accepted as resume. Score: {score}/{max_score}, "
+                f"Confidence: {confidence:.2f}")
+
+    return ValidationResult(
+        is_valid=True,
+        value=text,
+        errors=[],
+        warnings=warnings,
+        confidence=confidence
+    )
+
+
 # ============================================================
 # FIELD VALIDATORS
 # ============================================================
@@ -448,11 +621,8 @@ EXTRACTION_SCHEMA = {
     "email": {"type": "string", "required": False, "validator": validate_email},
     "phone": {"type": "string", "required": False, "validator": validate_phone},
     "linkedin_url": {"type": "string", "required": False, "validator": lambda x: validate_url(x, "linkedin")},
-    "portfolio_url": {"type": "string", "required": False, "validator": lambda x: validate_url(x, "url")},
-    "github_url": {"type": "string", "required": False, "validator": lambda x: validate_url(x, "github")},
     "department": {"type": "string", "required": False, "validator": validate_department},
     "position": {"type": "string", "required": False, "validator": lambda x: ValidationResult(is_valid=True, value=x if x and x not in ['null', 'None', ''] else None, confidence=0.8)},
-    "career_objective": {"type": "string", "required": False, "validator": None},
     "summary": {"type": "string", "required": False, "validator": None},
     "work_experience": {"type": "array", "required": False, "validator": lambda x: validate_array_field(x, "work_experience")},
     "education": {"type": "array", "required": False, "validator": lambda x: validate_array_field(x, "education")},

@@ -634,3 +634,618 @@ def find_employees_in_date_range(db, start_year: int, end_year: int = None):
             results.append((emp, overlap_jobs))
 
     return results
+
+
+# ============================================================
+# EDGE CASE #16: UNICODE/DIACRITICS HANDLING
+# José = Jose, Müller = Mueller, Björk = Bjork
+# ============================================================
+
+# Unicode to ASCII mapping for common diacritics
+UNICODE_TO_ASCII = {
+    'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'ã': 'a', 'å': 'a', 'ā': 'a',
+    'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'ē': 'e',
+    'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ī': 'i',
+    'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o', 'õ': 'o', 'ō': 'o', 'ø': 'o',
+    'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ū': 'u',
+    'ñ': 'n', 'ń': 'n',
+    'ç': 'c', 'ć': 'c',
+    'ß': 'ss',
+    'æ': 'ae', 'œ': 'oe',
+    'ý': 'y', 'ÿ': 'y',
+    'ž': 'z', 'ź': 'z',
+    'š': 's', 'ś': 's',
+    'ł': 'l',
+    'đ': 'd',
+}
+
+
+def normalize_unicode(text: str) -> str:
+    """Normalize Unicode characters to ASCII equivalents.
+
+    Handles accented characters common in international names.
+
+    Args:
+        text: Text possibly containing Unicode characters
+
+    Returns:
+        ASCII-normalized text
+    """
+    if not text:
+        return ""
+
+    result = text.lower()
+    for unicode_char, ascii_char in UNICODE_TO_ASCII.items():
+        result = result.replace(unicode_char, ascii_char)
+
+    # Also try unicodedata normalization as fallback
+    try:
+        import unicodedata
+        # NFD decomposition + remove combining characters
+        normalized = unicodedata.normalize('NFD', result)
+        result = ''.join(c for c in normalized if unicodedata.category(c) != 'Mn')
+    except Exception:
+        pass
+
+    return result
+
+
+# ============================================================
+# EDGE CASE #17: PHONETIC/SOUNDEX MATCHING
+# Smith = Smyth, John = Jon, Catherine = Katherine
+# ============================================================
+
+def soundex(name: str) -> str:
+    """Generate Soundex code for phonetic matching.
+
+    Soundex encodes similar-sounding names to the same code.
+    Example: Smith and Smyth both encode to S530
+
+    Args:
+        name: Name to encode
+
+    Returns:
+        4-character Soundex code
+    """
+    if not name:
+        return ""
+
+    name = normalize_unicode(name.upper().strip())
+    if not name:
+        return ""
+
+    # Soundex mapping
+    soundex_map = {
+        'B': '1', 'F': '1', 'P': '1', 'V': '1',
+        'C': '2', 'G': '2', 'J': '2', 'K': '2', 'Q': '2', 'S': '2', 'X': '2', 'Z': '2',
+        'D': '3', 'T': '3',
+        'L': '4',
+        'M': '5', 'N': '5',
+        'R': '6'
+    }
+
+    # Keep first letter
+    first_letter = name[0]
+
+    # Encode remaining letters
+    encoded = first_letter
+    prev_code = soundex_map.get(first_letter, '0')
+
+    for char in name[1:]:
+        code = soundex_map.get(char, '0')
+        if code != '0' and code != prev_code:
+            encoded += code
+        prev_code = code
+
+        if len(encoded) >= 4:
+            break
+
+    # Pad with zeros to make 4 characters
+    encoded = (encoded + '000')[:4]
+
+    return encoded
+
+
+def names_sound_similar(name1: str, name2: str) -> bool:
+    """Check if two names sound similar using Soundex.
+
+    Args:
+        name1, name2: Names to compare
+
+    Returns:
+        True if names have same Soundex code
+    """
+    if not name1 or not name2:
+        return False
+
+    # Compare each word in multi-word names
+    words1 = name1.split()
+    words2 = name2.split()
+
+    # If different word count, check if first/last names match
+    if len(words1) != len(words2):
+        # At least first or last name should match
+        if soundex(words1[0]) == soundex(words2[0]):
+            return True
+        if soundex(words1[-1]) == soundex(words2[-1]):
+            return True
+        return False
+
+    # Same word count - check if all words match
+    matches = sum(1 for w1, w2 in zip(words1, words2) if soundex(w1) == soundex(w2))
+    return matches >= len(words1) * 0.5  # At least 50% match
+
+
+# ============================================================
+# EDGE CASE #18: HONORIFICS/TITLE STRIPPING
+# Dr. John Smith = John Smith, Mr. = '', Jr. = '', III = ''
+# ============================================================
+
+HONORIFICS = {
+    # Prefixes
+    'mr', 'mr.', 'mrs', 'mrs.', 'ms', 'ms.', 'miss', 'dr', 'dr.',
+    'prof', 'prof.', 'professor', 'rev', 'rev.', 'sir', 'madam',
+    'hon', 'hon.', 'honorable', 'judge', 'capt', 'capt.', 'captain',
+    'col', 'col.', 'colonel', 'gen', 'gen.', 'general', 'lt', 'lt.',
+    'sgt', 'sgt.', 'major',
+
+    # Suffixes
+    'jr', 'jr.', 'junior', 'sr', 'sr.', 'senior',
+    'i', 'ii', 'iii', 'iv', 'v',  # Roman numerals
+    'phd', 'ph.d', 'ph.d.', 'md', 'm.d', 'm.d.',
+    'esq', 'esq.', 'esquire',
+    'mba', 'm.b.a', 'cpa', 'c.p.a',
+}
+
+
+def strip_honorifics(name: str) -> str:
+    """Remove honorifics and titles from a name.
+
+    Args:
+        name: Full name possibly with honorifics
+
+    Returns:
+        Name without honorifics
+    """
+    if not name:
+        return ""
+
+    words = name.split()
+    cleaned = []
+
+    for word in words:
+        word_lower = word.lower().strip('.,')
+        if word_lower not in HONORIFICS:
+            cleaned.append(word)
+
+    return ' '.join(cleaned)
+
+
+# ============================================================
+# EDGE CASE #19: ABBREVIATION EXPANSION
+# Sr. Engineer = Senior Engineer, Mgr = Manager, Dev = Developer
+# ============================================================
+
+TITLE_ABBREVIATIONS = {
+    # Seniority
+    'sr': 'senior', 'sr.': 'senior',
+    'jr': 'junior', 'jr.': 'junior',
+
+    # Roles
+    'mgr': 'manager', 'mgr.': 'manager',
+    'dir': 'director', 'dir.': 'director',
+    'eng': 'engineer', 'eng.': 'engineer',
+    'dev': 'developer', 'dev.': 'developer',
+    'admin': 'administrator',
+    'exec': 'executive', 'exec.': 'executive',
+    'vp': 'vice president',
+    'svp': 'senior vice president',
+    'evp': 'executive vice president',
+    'cto': 'chief technology officer',
+    'ceo': 'chief executive officer',
+    'cfo': 'chief financial officer',
+    'coo': 'chief operating officer',
+    'cio': 'chief information officer',
+
+    # Technical
+    'sw': 'software',
+    'hw': 'hardware',
+    'qa': 'quality assurance',
+    'qe': 'quality engineer',
+    'swe': 'software engineer',
+    'sde': 'software development engineer',
+    'mts': 'member of technical staff',
+    'pm': 'product manager',
+    'tpm': 'technical program manager',
+    'em': 'engineering manager',
+
+    # Departments
+    'hr': 'human resources',
+    'it': 'information technology',
+    'r&d': 'research and development',
+    'ops': 'operations',
+    'mktg': 'marketing',
+    'fin': 'finance',
+}
+
+
+def expand_abbreviations(text: str) -> str:
+    """Expand common abbreviations in titles/positions.
+
+    Args:
+        text: Text possibly containing abbreviations
+
+    Returns:
+        Text with abbreviations expanded
+    """
+    if not text:
+        return ""
+
+    words = text.lower().split()
+    expanded = []
+
+    for word in words:
+        word_clean = word.strip('.,')
+        if word_clean in TITLE_ABBREVIATIONS:
+            expanded.append(TITLE_ABBREVIATIONS[word_clean])
+        else:
+            expanded.append(word)
+
+    return ' '.join(expanded)
+
+
+def titles_match(search_title: str, db_title: str) -> Tuple[bool, int]:
+    """Check if two job titles match, considering abbreviations.
+
+    Args:
+        search_title: Title being searched for
+        db_title: Title from database
+
+    Returns:
+        Tuple of (matches: bool, confidence: 0-100)
+    """
+    if not search_title or not db_title:
+        return (False, 0)
+
+    # Normalize both
+    search_norm = expand_abbreviations(search_title.lower())
+    db_norm = expand_abbreviations(db_title.lower())
+
+    # Exact match
+    if search_norm == db_norm:
+        return (True, 100)
+
+    # Contains match
+    if search_norm in db_norm or db_norm in search_norm:
+        return (True, 80)
+
+    # Word overlap
+    search_words = set(search_norm.split())
+    db_words = set(db_norm.split())
+    overlap = search_words & db_words
+
+    if overlap:
+        confidence = int(len(overlap) / max(len(search_words), len(db_words)) * 100)
+        return (True, confidence) if confidence >= 40 else (False, confidence)
+
+    return (False, 0)
+
+
+# ============================================================
+# EDGE CASE #20: TEMPORAL REFERENCE HANDLING
+# "joined last year", "hired 2 months ago", "started in Q1 2023"
+# ============================================================
+
+def parse_temporal_reference(text: str) -> Optional[Tuple[date, date]]:
+    """Parse temporal references like 'last year', '2 months ago'.
+
+    Args:
+        text: Text containing temporal reference
+
+    Returns:
+        Tuple of (start_date, end_date) or None
+    """
+    text_lower = text.lower()
+    today = date.today()
+
+    # Patterns and their date calculations
+    if 'last year' in text_lower:
+        last_year = today.year - 1
+        return (date(last_year, 1, 1), date(last_year, 12, 31))
+
+    if 'this year' in text_lower:
+        return (date(today.year, 1, 1), today)
+
+    if 'last month' in text_lower:
+        first_of_month = today.replace(day=1)
+        last_month_end = first_of_month - relativedelta(days=1)
+        last_month_start = last_month_end.replace(day=1)
+        return (last_month_start, last_month_end)
+
+    if 'this month' in text_lower:
+        return (today.replace(day=1), today)
+
+    # "X months ago", "X years ago"
+    months_ago_match = re.search(r'(\d+)\s*months?\s*ago', text_lower)
+    if months_ago_match:
+        months = int(months_ago_match.group(1))
+        start_date = today - relativedelta(months=months)
+        return (start_date, today)
+
+    years_ago_match = re.search(r'(\d+)\s*years?\s*ago', text_lower)
+    if years_ago_match:
+        years = int(years_ago_match.group(1))
+        start_date = today - relativedelta(years=years)
+        return (start_date, today)
+
+    # "in Q1/Q2/Q3/Q4 2023"
+    quarter_match = re.search(r'q([1-4])\s*(\d{4})', text_lower)
+    if quarter_match:
+        quarter = int(quarter_match.group(1))
+        year = int(quarter_match.group(2))
+        quarter_starts = {1: 1, 2: 4, 3: 7, 4: 10}
+        quarter_ends = {1: 3, 2: 6, 3: 9, 4: 12}
+        start_month = quarter_starts[quarter]
+        end_month = quarter_ends[quarter]
+        return (date(year, start_month, 1), date(year, end_month, 28))
+
+    # "last week"
+    if 'last week' in text_lower:
+        start_date = today - relativedelta(weeks=1)
+        return (start_date, today)
+
+    # "recently" = last 3 months
+    if 'recently' in text_lower or 'recent' in text_lower:
+        start_date = today - relativedelta(months=3)
+        return (start_date, today)
+
+    return None
+
+
+# ============================================================
+# EDGE CASE #21: NULL/EMPTY FIELD QUERIES
+# "employees without email", "missing phone number"
+# ============================================================
+
+def parse_null_field_query(query: str) -> Optional[Tuple[str, bool]]:
+    """Parse queries about missing/empty fields.
+
+    Args:
+        query: Query string like "employees without email"
+
+    Returns:
+        Tuple of (field_name, is_null_search) or None
+    """
+    query_lower = query.lower()
+
+    # Patterns indicating null search
+    null_patterns = ['without', 'missing', 'no ', 'empty', 'blank', "don't have", "doesn't have"]
+    has_null_pattern = any(p in query_lower for p in null_patterns)
+
+    # Patterns indicating non-null search
+    has_patterns = ['with ', 'have ', 'has ']
+    has_value_pattern = any(p in query_lower for p in has_patterns)
+
+    # Field mappings
+    field_keywords = {
+        'email': 'email',
+        'phone': 'phone',
+        'department': 'department',
+        'position': 'position',
+        'skills': 'technical_skills',
+        'experience': 'work_experience',
+        'education': 'education',
+        'linkedin': 'linkedin_url',
+    }
+
+    # Find which field is being queried
+    for keyword, field in field_keywords.items():
+        if keyword in query_lower:
+            if has_null_pattern:
+                return (field, True)  # Looking for NULL
+            elif has_value_pattern:
+                return (field, False)  # Looking for NOT NULL
+
+    return None
+
+
+def find_employees_with_null_field(db, field_name: str, is_null: bool = True):
+    """Find employees with null or non-null field values.
+
+    Args:
+        db: Database session
+        field_name: Field to check
+        is_null: True to find null values, False to find non-null
+
+    Returns:
+        List of matching employees
+    """
+    from app.db import models
+
+    all_employees = db.query(models.Employee).all()
+    results = []
+
+    for emp in all_employees:
+        field_value = getattr(emp, field_name, None)
+
+        # Check if field is effectively empty
+        is_empty = (
+            field_value is None or
+            field_value == '' or
+            field_value == 'N/A' or
+            field_value == 'null' or
+            (isinstance(field_value, str) and field_value.strip() == '')
+        )
+
+        if is_null and is_empty:
+            results.append(emp)
+        elif not is_null and not is_empty:
+            results.append(emp)
+
+    return results
+
+
+# ============================================================
+# EDGE CASE #22: COMPOUND QUERY PARSING
+# "Python AND AWS NOT junior", "senior OR lead engineers"
+# ============================================================
+
+def parse_compound_query(query: str) -> Dict[str, Any]:
+    """Parse compound queries with AND, OR, NOT operators.
+
+    Args:
+        query: Query string like "Python AND AWS NOT junior"
+
+    Returns:
+        Dict with 'must_have', 'should_have', 'must_not' lists
+    """
+    result = {
+        'must_have': [],      # AND conditions
+        'should_have': [],    # OR conditions
+        'must_not': [],       # NOT conditions
+    }
+
+    query_lower = query.lower()
+
+    # Extract NOT conditions first
+    not_patterns = [
+        r'\bnot\s+(\w+)',
+        r'\bexcept\s+(\w+)',
+        r'\bexcluding\s+(\w+)',
+        r'\bwithout\s+(\w+)',
+    ]
+
+    for pattern in not_patterns:
+        matches = re.findall(pattern, query_lower)
+        result['must_not'].extend(matches)
+        # Remove from query for further processing
+        query_lower = re.sub(pattern, '', query_lower)
+
+    # Check for explicit AND
+    if ' and ' in query_lower:
+        parts = query_lower.split(' and ')
+        for part in parts:
+            terms = [t.strip() for t in part.split() if len(t.strip()) > 2]
+            result['must_have'].extend(terms)
+
+    # Check for explicit OR
+    elif ' or ' in query_lower:
+        parts = query_lower.split(' or ')
+        for part in parts:
+            terms = [t.strip() for t in part.split() if len(t.strip()) > 2]
+            result['should_have'].extend(terms)
+
+    # Default: treat space-separated as AND
+    else:
+        terms = [t.strip() for t in query_lower.split() if len(t.strip()) > 2]
+        # Filter out common words
+        stopwords = {'the', 'and', 'for', 'with', 'find', 'show', 'list', 'get', 'employees', 'employee'}
+        terms = [t for t in terms if t not in stopwords]
+        result['must_have'].extend(terms)
+
+    # Deduplicate
+    result['must_have'] = list(set(result['must_have']))
+    result['should_have'] = list(set(result['should_have']))
+    result['must_not'] = list(set(result['must_not']))
+
+    return result
+
+
+def apply_compound_filter(employees: List, compound_query: Dict[str, Any],
+                          search_fields: List[str] = None) -> List:
+    """Apply compound query filters to employee list.
+
+    Args:
+        employees: List of employee objects
+        compound_query: Result from parse_compound_query()
+        search_fields: Fields to search in (default: name, position, technical_skills)
+
+    Returns:
+        Filtered list of employees
+    """
+    if not search_fields:
+        search_fields = ['name', 'position', 'technical_skills', 'department']
+
+    results = []
+
+    for emp in employees:
+        # Combine all searchable text
+        search_text = ''
+        for field in search_fields:
+            value = getattr(emp, field, '') or ''
+            search_text += ' ' + value.lower()
+
+        # Check must_have (AND) - all must be present
+        if compound_query['must_have']:
+            if not all(term in search_text for term in compound_query['must_have']):
+                continue
+
+        # Check should_have (OR) - at least one must be present
+        if compound_query['should_have']:
+            if not any(term in search_text for term in compound_query['should_have']):
+                continue
+
+        # Check must_not (NOT) - none should be present
+        if compound_query['must_not']:
+            if any(term in search_text for term in compound_query['must_not']):
+                continue
+
+        results.append(emp)
+
+    return results
+
+
+# ============================================================
+# EDGE CASE #23: NUMERIC RANGE PARSING
+# "3-5 years experience", "salary 50k-80k", "age 25-35"
+# ============================================================
+
+def parse_numeric_range(text: str) -> Optional[Tuple[float, float, str]]:
+    """Parse numeric ranges from text.
+
+    Args:
+        text: Text like "3-5 years" or "50k-80k salary"
+
+    Returns:
+        Tuple of (min_value, max_value, unit) or None
+    """
+    text_lower = text.lower()
+
+    # Patterns for ranges
+    patterns = [
+        # "3-5 years"
+        (r'(\d+(?:\.\d+)?)\s*[-–to]+\s*(\d+(?:\.\d+)?)\s*(years?|months?|weeks?)', 'experience'),
+        # "5+ years"
+        (r'(\d+(?:\.\d+)?)\+\s*(years?|months?)', 'experience_min'),
+        # "under 5 years"
+        (r'(?:under|less than|below)\s*(\d+(?:\.\d+)?)\s*(years?|months?)', 'experience_max'),
+        # "50k-80k"
+        (r'(\d+)k\s*[-–to]+\s*(\d+)k', 'salary'),
+        # "$50,000-$80,000"
+        (r'\$?([\d,]+)\s*[-–to]+\s*\$?([\d,]+)', 'salary'),
+    ]
+
+    for pattern, range_type in patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            groups = match.groups()
+            if range_type == 'experience':
+                min_val = float(groups[0])
+                max_val = float(groups[1])
+                unit = groups[2]
+                return (min_val, max_val, unit)
+            elif range_type == 'experience_min':
+                min_val = float(groups[0])
+                return (min_val, 100, groups[1])  # 100 as max
+            elif range_type == 'experience_max':
+                max_val = float(groups[0])
+                return (0, max_val, groups[1])
+            elif range_type == 'salary':
+                min_val = float(groups[0].replace(',', ''))
+                max_val = float(groups[1].replace(',', ''))
+                if 'k' in text_lower:
+                    min_val *= 1000
+                    max_val *= 1000
+                return (min_val, max_val, 'salary')
+
+    return None
