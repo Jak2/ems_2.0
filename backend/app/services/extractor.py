@@ -49,6 +49,61 @@ def normalize_text(text: str) -> str:
     return text
 
 
+def extract_text_from_image(data: bytes) -> str:
+    """Extract text from an image file (bytes) using OCR.
+
+    Supports common image formats: JPEG, PNG, GIF, BMP, WebP.
+    Uses pytesseract for OCR text extraction.
+
+    Args:
+        data: Raw image bytes
+
+    Returns:
+        Extracted and normalized text
+    """
+    if not pytesseract or not Image:
+        raise RuntimeError(
+            "Image OCR requires pytesseract and Pillow. "
+            "Install them with: pip install pytesseract Pillow"
+        )
+
+    try:
+        # Check if Tesseract is accessible
+        try:
+            pytesseract.get_tesseract_version()
+        except Exception as e:
+            raise RuntimeError(
+                f"Tesseract OCR not found or not accessible: {e}\n"
+                "Please install Tesseract:\n"
+                "  Windows: https://github.com/UB-Mannheim/tesseract/wiki\n"
+                "  Linux: sudo apt install tesseract-ocr\n"
+                "  Mac: brew install tesseract"
+            )
+
+        # Open image from bytes
+        img = Image.open(io.BytesIO(data))
+
+        # Convert to RGB if necessary (e.g., for RGBA or palette images)
+        if img.mode not in ('L', 'RGB'):
+            img = img.convert('RGB')
+
+        # Perform OCR with additional config for better accuracy
+        # --psm 1: Automatic page segmentation with OSD
+        # -l eng: English language
+        custom_config = r'--psm 1 -l eng'
+        text = pytesseract.image_to_string(img, config=custom_config)
+
+        # If first attempt returns minimal text, try different PSM mode
+        if len(text.strip()) < 50:
+            # --psm 3: Fully automatic page segmentation (default)
+            text = pytesseract.image_to_string(img, config=r'--psm 3')
+
+        # Normalize the extracted text
+        return normalize_text(text)
+    except Exception as e:
+        raise RuntimeError(f"Failed to extract text from image: {e}")
+
+
 def extract_text_from_bytes(data: bytes) -> str:
     """Extract text from a PDF file (bytes). Uses pdfplumber for a reliable text extraction.
 
@@ -98,3 +153,60 @@ def extract_text_from_bytes(data: bytes) -> str:
     except Exception:
         # fallback: return empty string
         return ""
+
+
+# Supported image extensions for OCR
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
+
+
+def is_image_file(filename: str) -> bool:
+    """Check if filename has an image extension."""
+    if not filename:
+        return False
+    ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else ''
+    return f'.{ext}' in IMAGE_EXTENSIONS
+
+
+def is_pdf_file(filename: str) -> bool:
+    """Check if filename has a PDF extension."""
+    if not filename:
+        return False
+    return filename.lower().endswith('.pdf')
+
+
+def extract_text_auto(data: bytes, filename: str) -> str:
+    """Auto-detect file type and extract text using the appropriate method.
+
+    Supports:
+    - PDF files: Uses pdfplumber with OCR fallback
+    - Image files: Uses pytesseract OCR directly
+
+    Args:
+        data: Raw file bytes
+        filename: Original filename (used for type detection)
+
+    Returns:
+        Extracted and normalized text
+
+    Raises:
+        ValueError: If file type is not supported
+    """
+    if is_pdf_file(filename):
+        return extract_text_from_bytes(data)
+    elif is_image_file(filename):
+        return extract_text_from_image(data)
+    else:
+        # Try to detect by magic bytes
+        if data[:4] == b'%PDF':
+            return extract_text_from_bytes(data)
+        # Check for common image signatures
+        if data[:3] == b'\xff\xd8\xff':  # JPEG
+            return extract_text_from_image(data)
+        if data[:8] == b'\x89PNG\r\n\x1a\n':  # PNG
+            return extract_text_from_image(data)
+        if data[:6] in (b'GIF87a', b'GIF89a'):  # GIF
+            return extract_text_from_image(data)
+        if data[:2] == b'BM':  # BMP
+            return extract_text_from_image(data)
+
+        raise ValueError(f"Unsupported file type: {filename}")

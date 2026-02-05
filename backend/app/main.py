@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()  # This must be called before importing other modules that use os.getenv()
 
 from app.services.storage import Storage
-from app.services.extractor import extract_text_from_bytes
+from app.services.extractor import extract_text_from_bytes, extract_text_auto, is_image_file, is_pdf_file
 from app.services.llm_adapter import OllamaAdapter
 from app.services.embeddings import Embeddings
 from app.services.vectorstore_faiss import FaissVectorStore
@@ -33,7 +33,8 @@ from app.services.validators import (
     validate_input_length,
     validate_is_resume,
     enforce_schema,
-    validate_and_clean_extraction
+    validate_and_clean_extraction,
+    ValidationResult
 )
 from app.services.search_utils import (
     expand_skill_search,
@@ -329,7 +330,14 @@ class UploadResponse(BaseModel):
 
 @app.post("/api/upload-cv", response_model=UploadResponse)
 async def upload_cv(file: UploadFile = File(...)):
-    """Upload a CV/resume PDF for processing."""
+    """Upload a CV/resume (PDF or image) for processing.
+
+    Supported formats:
+    - PDF files (.pdf)
+    - Image files (.jpg, .jpeg, .png, .gif, .bmp, .webp)
+
+    Images are processed using OCR (Optical Character Recognition).
+    """
     import threading
 
     logger.info(f"[UPLOAD] ========== UPLOAD REQUEST RECEIVED ==========")
@@ -401,17 +409,28 @@ def process_cv(file_id: str, filename: str, job_id: str):
 
     logger.info(f"[PROCESS_CV] ✓ Fetched {len(data)} bytes from storage")
 
-    # extract text
-    logger.info(f"[PROCESS_CV] → Extracting text from PDF...")
-    pdf_text = extract_text_from_bytes(data)
-    logger.info(f"[PROCESS_CV] ✓ Extracted {len(pdf_text)} characters from PDF")
+    # extract text - auto-detect file type (PDF or image)
+    is_image = is_image_file(filename)
+    file_type = "image" if is_image else "PDF"
+    logger.info(f"[PROCESS_CV] → Extracting text from {file_type}...")
+    try:
+        pdf_text = extract_text_auto(data, filename)
+    except Exception as e:
+        logger.error(f"[PROCESS_CV] ✗ Text extraction failed: {e}")
+        # For images, provide more detailed error
+        if is_image:
+            logger.error(f"[PROCESS_CV] ✗ OCR failed - ensure Tesseract is installed and in PATH")
+            logger.error(f"[PROCESS_CV] → Windows: https://github.com/UB-Mannheim/tesseract/wiki")
+            logger.error(f"[PROCESS_CV] → Linux: sudo apt install tesseract-ocr")
+        pdf_text = ""
+    logger.info(f"[PROCESS_CV] ✓ Extracted {len(pdf_text)} characters from {file_type}")
 
     # Log first 500 chars for debugging - helps verify extraction quality
     if pdf_text:
         preview = pdf_text[:500].replace('\n', '\\n')
         logger.info(f"[PROCESS_CV] → Extracted text preview: {preview}")
     else:
-        logger.warning(f"[PROCESS_CV] ✗ PDF text extraction returned empty! File may be image-based or corrupted.")
+        logger.warning(f"[PROCESS_CV] ✗ Text extraction returned empty! File may be corrupted or unreadable.")
 
     # log the raw extracted text excerpt for debugging
     try:
@@ -449,9 +468,34 @@ def process_cv(file_id: str, filename: str, job_id: str):
     # RESUME DOCUMENT VALIDATION
     # Verify the uploaded document is actually a resume/CV
     # Reject non-resume documents before storing in database
+    # NOTE: Images are more lenient since OCR can be imperfect
     # =====================================================
     logger.info(f"[PROCESS_CV] → Validating document is a resume...")
     resume_validation = validate_is_resume(pdf_text)
+    logger.info(f"[PROCESS_CV] → Validation score: {resume_validation.confidence * 100:.1f}%, is_valid: {resume_validation.is_valid}")
+
+    # For images, be more lenient - only reject if completely empty or very low confidence
+    # OCR text is often messy and may not have clear resume structure
+    if is_image and not resume_validation.is_valid:
+        if len(pdf_text.strip()) > 100 and resume_validation.confidence >= 0.15:
+            logger.info(f"[PROCESS_CV] → Image file - accepting with lower confidence (OCR text may be imperfect)")
+            resume_validation = ValidationResult(
+                is_valid=True,
+                value=resume_validation.value,
+                errors=[],
+                warnings=resume_validation.warnings + ["Accepted with lower confidence for image file"],
+                confidence=resume_validation.confidence
+            )
+        elif len(pdf_text.strip()) > 50:
+            # Even more lenient - if there's some text, accept it for images
+            logger.info(f"[PROCESS_CV] → Image file - accepting minimal OCR text")
+            resume_validation = ValidationResult(
+                is_valid=True,
+                value=resume_validation.value,
+                errors=[],
+                warnings=["Minimal OCR text - accepted for image file"],
+                confidence=0.1
+            )
 
     if not resume_validation.is_valid:
         logger.warning(f"[PROCESS_CV] ✗ Document rejected - NOT a resume")
@@ -1470,6 +1514,43 @@ async def chat(request: Request, req: ChatRequest | None = None):
                     "how many employees" in prompt_lower or \
                     "count employees" in prompt_lower or \
                     "total employees" in prompt_lower
+
+    # =====================================================
+    # SCHEMA QUERY DETECTION - Show only field/column names
+    # Pattern: "field names", "column names", "table structure", "schema"
+    # =====================================================
+    schema_keywords = [
+        "field names", "column names", "field name", "column name",
+        "table structure", "schema", "fields", "columns",
+        "what fields", "what columns", "which fields", "which columns",
+        "list fields", "list columns", "show fields", "show columns",
+        "only field", "only column", "just field", "just column"
+    ]
+
+    table_keywords = ["employee", "employees", "table"]
+
+    is_schema_query = (
+        any(kw in prompt_lower for kw in schema_keywords) and
+        any(tk in prompt_lower for tk in table_keywords)
+    )
+
+    if is_schema_query:
+        logger.info(f"[CHAT] → Detected SCHEMA query - returning field names only")
+
+        # Get field names from the Employee model
+        from app.db.models import Employee
+        field_names = [column.name for column in Employee.__table__.columns]
+
+        # Build context for LLM
+        special_llm_context = {
+            "type": "schema_info",
+            "table_name": "employees",
+            "field_names": field_names,
+            "field_count": len(field_names),
+            "user_message": req.prompt
+        }
+        llm_prompt_prepared = True
+        logger.info(f"[CHAT] → Schema query: {len(field_names)} fields found")
 
     # =====================================================
     # Check for READ queries about SPECIFIC employees
@@ -3375,6 +3456,29 @@ Hobbies: {emp.hobbies if hasattr(emp, 'hobbies') and emp.hobbies else 'N/A'}
                 "Don't mention technical details about the system.\n\n"
                 f"User said: \"{user_msg}\"\n\n"
                 "Respond naturally:"
+            )
+        elif context_type == "schema_info":
+            # Schema/field names query - show table structure
+            table_name = special_llm_context.get("table_name", "employees")
+            field_names = special_llm_context.get("field_names", [])
+            field_count = special_llm_context.get("field_count", 0)
+
+            fields_list = "\n".join([f"  - {field}" for field in field_names])
+
+            prompt = (
+                "You are an Employee Management System assistant. "
+                f"The user wants to know the field/column names of the {table_name} table.\n\n"
+                f"TABLE: {table_name}\n"
+                f"TOTAL FIELDS: {field_count}\n\n"
+                f"FIELD NAMES:\n{fields_list}\n\n"
+                "INSTRUCTIONS:\n"
+                "- Present the field names clearly in a formatted list\n"
+                "- Group related fields together if helpful (e.g., basic info, professional info, etc.)\n"
+                "- Mention the total number of fields\n"
+                "- Be concise but informative\n"
+                "- Do NOT include any actual employee data, just the field names\n\n"
+                f"User asked: \"{user_msg}\"\n\n"
+                "Present the schema information:"
             )
         elif context_type == "thanks":
             prompt = (

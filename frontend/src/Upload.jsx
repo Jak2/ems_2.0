@@ -19,6 +19,15 @@ export default function Upload({ onNewMessage, onLoadingChange }) {
     if (onLoadingChange) onLoadingChange(value)
   }
   const isProcessing = isProcessingState
+
+  // Get file icon based on file type
+  const getFileIcon = (filename) => {
+    const ext = filename.toLowerCase().split('.').pop()
+    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tiff', 'tif']
+    if (imageExts.includes(ext)) return '🖼️'
+    if (ext === 'pdf') return '📄'
+    return '📎'
+  }
   // file selection is done via the input below; we no longer expose a separate
   // "Upload" button. The selected file will be uploaded automatically when the
   // user presses Send. This simplifies the UX as requested.
@@ -305,7 +314,7 @@ export default function Upload({ onNewMessage, onLoadingChange }) {
         <div className="file-preview">
           {files.map((f, index) => (
             <div key={index} className="file-preview-content">
-              <span className="file-icon">📄</span>
+              <span className="file-icon">{getFileIcon(f.name)}</span>
               <span className="file-name">{f.name}</span>
               <button
                 type="button"
@@ -333,7 +342,7 @@ export default function Upload({ onNewMessage, onLoadingChange }) {
       <form onSubmit={handleChat} className="chat-input-container">
         <input
           type="file"
-          accept="application/pdf"
+          accept="application/pdf,image/jpeg,image/jpg,image/png,image/gif,image/bmp,image/webp"
           multiple
           onChange={(e) => {
             const selectedFiles = Array.from(e.target.files)
@@ -344,7 +353,7 @@ export default function Upload({ onNewMessage, onLoadingChange }) {
           id="file-input"
           style={{ display: 'none' }}
         />
-        <label htmlFor="file-input" className="file-picker-btn" title="Attach PDFs (multiple allowed)">
+        <label htmlFor="file-input" className="file-picker-btn" title="Attach files (PDF or images)">
           <span className="plus-icon">+</span>
         </label>
 

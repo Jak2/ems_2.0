@@ -10,6 +10,16 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false)
   const chatRef = useRef(null)
 
+  // Get file icon based on filename
+  const getFileIcon = (filename) => {
+    if (!filename) return '📎'
+    const ext = filename.toLowerCase().split('.').pop()
+    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tiff', 'tif']
+    if (imageExts.includes(ext)) return '🖼️'
+    if (ext === 'pdf') return '📄'
+    return '📎'
+  }
+
   // Smooth-scroll the chat container to the absolute bottom to show the
   // latest message. Uses smooth behavior for better UX.
   function scrollToBottom() {
@@ -79,7 +89,7 @@ export default function App() {
           if (m.type === "attachment") {
             return (
               <div key={i} className="message attachment-message">
-                <span className="attachment-icon">📎</span>
+                <span className="attachment-icon">{getFileIcon(m.filename)}</span>
                 <span className="attachment-name">{m.filename}</span>
               </div>
             )
