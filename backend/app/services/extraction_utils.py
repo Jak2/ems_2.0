@@ -992,3 +992,184 @@ def extract_skills_from_text(text: str) -> List[str]:
             found_skills.append(skill.title() if len(skill) > 3 else skill.upper())
 
     return list(set(found_skills))
+
+
+# ============================================================
+# MULTI-QUERY DECOMPOSITION (Complex Query Handling)
+# ============================================================
+
+# Keywords that indicate multiple tasks in a single query
+MULTI_QUERY_INDICATORS = [
+    " and ",
+    " also ",
+    " then ",
+    " after that ",
+    " additionally ",
+    ", compare ",
+    ", tell me ",
+    ", show me ",
+    ", list ",
+    ", count ",
+    ", find ",
+]
+
+# Conjunctions that typically connect separate tasks
+TASK_CONJUNCTIONS = [
+    "and what",
+    "and who",
+    "and how",
+    "and count",
+    "and compare",
+    "and tell",
+    "and show",
+    "and list",
+    "and find",
+    "also tell",
+    "also show",
+    "also find",
+    ", compare",
+    ", then",
+]
+
+
+def detect_multi_query(prompt: str) -> bool:
+    """Detect if a prompt contains multiple distinct tasks/queries.
+
+    Args:
+        prompt: User's input prompt
+
+    Returns:
+        True if the prompt appears to contain multiple tasks
+    """
+    prompt_lower = prompt.lower()
+
+    # Check for task conjunction patterns
+    conjunction_count = sum(1 for conj in TASK_CONJUNCTIONS if conj in prompt_lower)
+    if conjunction_count >= 1:
+        return True
+
+    # Check for multiple question words
+    question_words = ["what", "who", "how many", "count", "compare", "list", "show", "find"]
+    question_count = sum(1 for qw in question_words if qw in prompt_lower)
+    if question_count >= 3:
+        return True
+
+    # Check for multiple employee names mentioned with different actions
+    # Pattern: "X's skills" and "Y's skills" or similar
+    possessive_pattern = re.compile(r"(\w+)'s\s+(skills|email|phone|experience|education)", re.IGNORECASE)
+    possessives = possessive_pattern.findall(prompt)
+    if len(possessives) >= 2:
+        return True
+
+    return False
+
+
+QUERY_DECOMPOSITION_PROMPT = """You are a query analyzer. Break down this complex query into simple, independent sub-tasks.
+
+RULES:
+1. Each sub-task should be a single, focused question or action
+2. Maintain the order of tasks as mentioned in the original query
+3. If a task depends on a previous result, note it with [DEPENDS: task_number]
+4. Return ONLY a JSON array of sub-tasks
+
+EXAMPLE INPUT:
+"what skills debraj has and count his skills related to cloud and devops, and what skills does udayateja has, compare both skills"
+
+EXAMPLE OUTPUT:
+[
+  {"task_id": 1, "query": "What skills does Debraj have?", "type": "search", "depends_on": null},
+  {"task_id": 2, "query": "Count Debraj's skills related to cloud and devops", "type": "count", "depends_on": 1},
+  {"task_id": 3, "query": "What skills does Udayateja have?", "type": "search", "depends_on": null},
+  {"task_id": 4, "query": "Compare Debraj's and Udayateja's skills and determine who has more devops knowledge", "type": "compare", "depends_on": [1, 3]}
+]
+
+USER QUERY:
+{user_query}
+
+Return ONLY the JSON array:"""
+
+
+def create_decomposition_prompt(user_query: str) -> str:
+    """Create a prompt to decompose a complex query into sub-tasks.
+
+    Args:
+        user_query: The original complex query from user
+
+    Returns:
+        Formatted prompt for LLM
+    """
+    return QUERY_DECOMPOSITION_PROMPT.format(user_query=user_query)
+
+
+def parse_decomposed_tasks(llm_response: str) -> List[Dict]:
+    """Parse the LLM response containing decomposed tasks.
+
+    Args:
+        llm_response: Raw LLM response with JSON array
+
+    Returns:
+        List of task dictionaries
+    """
+    if not llm_response:
+        return []
+
+    # Try to extract JSON array from response
+    try:
+        # Direct parse
+        tasks = json.loads(llm_response)
+        if isinstance(tasks, list):
+            return tasks
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find JSON array in response
+    match = re.search(r'\[.*\]', llm_response, re.DOTALL)
+    if match:
+        try:
+            tasks = json.loads(match.group(0))
+            if isinstance(tasks, list):
+                return tasks
+        except json.JSONDecodeError:
+            pass
+
+    return []
+
+
+RESULT_AGGREGATION_PROMPT = """You are a helpful assistant. Combine these sub-task results into a single, coherent response.
+
+ORIGINAL QUESTION:
+{original_query}
+
+SUB-TASK RESULTS:
+{task_results}
+
+RULES:
+1. Present the information in a clear, organized manner
+2. Use bullet points or sections if there are multiple parts
+3. If comparisons were requested, clearly state the conclusion
+4. Be concise but complete
+5. If any sub-task failed, mention what information couldn't be retrieved
+
+Provide a natural, conversational response:"""
+
+
+def create_aggregation_prompt(original_query: str, task_results: List[Dict]) -> str:
+    """Create a prompt to aggregate multiple sub-task results.
+
+    Args:
+        original_query: The original user query
+        task_results: List of results from each sub-task
+
+    Returns:
+        Formatted prompt for LLM aggregation
+    """
+    results_text = ""
+    for i, result in enumerate(task_results, 1):
+        task_query = result.get("query", f"Task {i}")
+        task_response = result.get("response", "No response")
+        results_text += f"\n[Task {i}] {task_query}\nResult: {task_response}\n"
+
+    return RESULT_AGGREGATION_PROMPT.format(
+        original_query=original_query,
+        task_results=results_text
+    )

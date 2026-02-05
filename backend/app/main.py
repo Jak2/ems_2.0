@@ -26,7 +26,11 @@ from app.services.extraction_utils import (
     quick_verify_extraction,
     create_ensemble_prompts,
     merge_ensemble_results,
-    get_ensemble_temperatures
+    get_ensemble_temperatures,
+    detect_multi_query,
+    create_decomposition_prompt,
+    parse_decomposed_tasks,
+    create_aggregation_prompt
 )
 from app.services.validators import (
     sanitize_input,
@@ -1003,6 +1007,170 @@ async def chat(request: Request, req: ChatRequest | None = None):
     # Retrieve conversation history for this session
     conversation_history = list(conversation_store[session_id])
     logger.info(f"[CHAT] Conversation history: {len(conversation_history)} messages")
+
+    # =====================================================
+    # MULTI-QUERY DETECTION AND HANDLING
+    # Detects complex queries with multiple tasks and processes them
+    # Example: "what skills does X have and compare with Y"
+    # =====================================================
+    if detect_multi_query(prompt) and len(prompt) > 50:
+        logger.info(f"[CHAT] *** MULTI-QUERY DETECTED ***")
+        try:
+            # Step 1: Decompose the query into sub-tasks using LLM
+            decomposition_prompt = create_decomposition_prompt(prompt)
+            decomposition_response = llm.generate(decomposition_prompt)
+            sub_tasks = parse_decomposed_tasks(decomposition_response)
+
+            if sub_tasks and len(sub_tasks) > 1:
+                logger.info(f"[CHAT] Decomposed into {len(sub_tasks)} sub-tasks")
+
+                # Step 2: Execute each sub-task
+                task_results = []
+                task_context = {}  # Store results for dependent tasks
+
+                for task in sub_tasks:
+                    task_id = task.get("task_id", len(task_results) + 1)
+                    task_query = task.get("query", "")
+                    task_type = task.get("type", "search")
+                    depends_on = task.get("depends_on")
+
+                    logger.info(f"[CHAT] Executing sub-task {task_id}: {task_query[:50]}...")
+
+                    # Build context from dependent tasks
+                    context_info = ""
+                    if depends_on:
+                        deps = [depends_on] if isinstance(depends_on, int) else depends_on
+                        for dep_id in deps:
+                            if dep_id in task_context:
+                                context_info += f"\n[Context from Task {dep_id}]: {task_context[dep_id]}"
+
+                    # Execute the sub-task query
+                    # Create a simple search/query prompt
+                    sub_task_prompt = task_query
+                    if context_info:
+                        sub_task_prompt = f"{task_query}\n\nContext:{context_info}"
+
+                    # Search for relevant employees mentioned in the sub-task
+                    db = SessionLocal()
+                    all_employees = db.query(models.Employee).all()
+
+                    # Find employees mentioned in this sub-task
+                    task_query_lower = task_query.lower()
+                    mentioned_in_task = []
+                    for emp in all_employees:
+                        if emp.name and emp.name.lower() in task_query_lower:
+                            mentioned_in_task.append(emp)
+                        elif emp.name:
+                            # Check first name
+                            first_name = emp.name.split()[0].lower()
+                            if first_name in task_query_lower and len(first_name) > 2:
+                                mentioned_in_task.append(emp)
+
+                    # Build response based on task type
+                    sub_response = ""
+
+                    if task_type == "search" and mentioned_in_task:
+                        emp = mentioned_in_task[0]
+                        skills = emp.technical_skills or "No skills listed"
+                        sub_response = f"{emp.name}'s skills: {skills}"
+                        task_context[task_id] = sub_response
+
+                    elif task_type == "count" and mentioned_in_task:
+                        emp = mentioned_in_task[0]
+                        skills_text = emp.technical_skills or ""
+                        skills_list = [s.strip() for s in skills_text.split(",") if s.strip()]
+
+                        # Count specific skill categories if mentioned
+                        cloud_devops_keywords = ["aws", "azure", "gcp", "docker", "kubernetes", "k8s",
+                                                  "jenkins", "ci/cd", "devops", "terraform", "ansible",
+                                                  "cloud", "ec2", "s3", "lambda", "ecs", "eks"]
+                        relevant_skills = [s for s in skills_list
+                                           if any(kw in s.lower() for kw in cloud_devops_keywords)]
+
+                        sub_response = f"{emp.name} has {len(skills_list)} total skills. "
+                        sub_response += f"Cloud/DevOps related: {len(relevant_skills)} skills"
+                        if relevant_skills:
+                            sub_response += f" ({', '.join(relevant_skills)})"
+                        task_context[task_id] = sub_response
+
+                    elif task_type == "compare" and len(mentioned_in_task) >= 2:
+                        # Compare skills between employees
+                        emp1, emp2 = mentioned_in_task[0], mentioned_in_task[1]
+                        skills1 = set(s.strip().lower() for s in (emp1.technical_skills or "").split(",") if s.strip())
+                        skills2 = set(s.strip().lower() for s in (emp2.technical_skills or "").split(",") if s.strip())
+
+                        cloud_devops_keywords = ["aws", "azure", "gcp", "docker", "kubernetes", "k8s",
+                                                  "jenkins", "ci/cd", "devops", "terraform", "ansible",
+                                                  "cloud", "ec2", "s3", "lambda"]
+
+                        devops1 = [s for s in skills1 if any(kw in s for kw in cloud_devops_keywords)]
+                        devops2 = [s for s in skills2 if any(kw in s for kw in cloud_devops_keywords)]
+
+                        common = skills1 & skills2
+                        only_emp1 = skills1 - skills2
+                        only_emp2 = skills2 - skills1
+
+                        sub_response = f"Comparison between {emp1.name} and {emp2.name}:\n"
+                        sub_response += f"- {emp1.name}: {len(skills1)} total skills, {len(devops1)} DevOps/Cloud\n"
+                        sub_response += f"- {emp2.name}: {len(skills2)} total skills, {len(devops2)} DevOps/Cloud\n"
+                        sub_response += f"- Common skills: {len(common)}\n"
+
+                        if len(devops1) > len(devops2):
+                            sub_response += f"- Conclusion: {emp1.name} has more DevOps/Cloud knowledge"
+                        elif len(devops2) > len(devops1):
+                            sub_response += f"- Conclusion: {emp2.name} has more DevOps/Cloud knowledge"
+                        else:
+                            sub_response += f"- Conclusion: Both have similar DevOps/Cloud knowledge"
+
+                        task_context[task_id] = sub_response
+
+                    elif mentioned_in_task:
+                        # Generic search - use LLM
+                        emp = mentioned_in_task[0]
+                        emp_info = f"Name: {emp.name}, Skills: {emp.technical_skills or 'N/A'}, Position: {emp.position or 'N/A'}"
+
+                        generic_prompt = f"""Based on this employee info:
+{emp_info}
+
+Answer: {task_query}
+
+Be concise and factual."""
+                        sub_response = llm.generate(generic_prompt)
+                        task_context[task_id] = sub_response
+                    else:
+                        sub_response = f"Could not find employee mentioned in: {task_query}"
+                        task_context[task_id] = sub_response
+
+                    db.close()
+
+                    task_results.append({
+                        "task_id": task_id,
+                        "query": task_query,
+                        "response": sub_response
+                    })
+
+                # Step 3: Aggregate results into final response
+                aggregation_prompt = create_aggregation_prompt(prompt, task_results)
+                final_response = llm.generate(aggregation_prompt)
+
+                # Add to conversation history
+                conversation_store[session_id].append({"role": "user", "content": prompt})
+                conversation_store[session_id].append({"role": "assistant", "content": final_response})
+
+                logger.info(f"[CHAT] Multi-query completed with {len(task_results)} sub-tasks")
+
+                return {
+                    "reply": final_response,
+                    "session_id": session_id,
+                    "employee_id": None,
+                    "employee_name": None,
+                    "multi_query": True,
+                    "sub_tasks_count": len(task_results)
+                }
+
+        except Exception as e:
+            logger.warning(f"[CHAT] Multi-query processing failed, falling back to single query: {e}")
+            # Fall through to normal processing
 
     # =====================================================
     # RESUME-BASED CREATE DETECTION
