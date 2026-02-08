@@ -1012,8 +1012,10 @@ async def chat(request: Request, req: ChatRequest | None = None):
     # MULTI-QUERY DETECTION AND HANDLING
     # Detects complex queries with multiple tasks and processes them
     # Example: "what skills does X have and compare with Y"
+    # NOTE: Skip for "create" commands - they contain resume text with many "and" words
     # =====================================================
-    if detect_multi_query(prompt) and len(prompt) > 50:
+    is_create_command = prompt.lower().strip().startswith("create ")
+    if detect_multi_query(prompt) and len(prompt) > 50 and not is_create_command:
         logger.info(f"[CHAT] *** MULTI-QUERY DETECTED ***")
         try:
             # Step 1: Decompose the query into sub-tasks using LLM
