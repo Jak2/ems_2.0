@@ -307,6 +307,8 @@ User: "what skills debraj has and count cloud skills,
          Return unified response
 ```
 
+**Important**: Multi-query detection is automatically **skipped for CRUD commands** (create, update, delete, etc.) to prevent false positives from resume text or field values containing "and".
+
 ---
 
 ## Key Integration Points Summary

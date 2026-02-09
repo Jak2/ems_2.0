@@ -441,5 +441,97 @@ his, her, their, he, she, him, them, employee's, person's
 
 ---
 
+---
+
+## Changelog: Bug Fixes & Errors Resolved
+
+### BUG-001: CRUD Operations Not Working (Create, Update, Delete)
+**Date**: February 2026
+**Severity**: Critical
+**Symptoms**: Create, update, and delete commands via chatbot were not executing database operations.
+
+**Root Causes Found (3 issues)**:
+
+| # | Root Cause | Location | Impact |
+|---|-----------|----------|--------|
+| 1 | Multi-query detection intercepting CRUD commands | `main.py:1017-1018` | Resume text in "create" commands and "and" in update commands triggered multi-query handler, preventing CRUD routing |
+| 2 | Name-based employee context check only ran for delete/remove | `main.py:1604-1622` | Commands like "update john's email" failed because employee name lookup only ran for delete/remove, not update/create/modify |
+| 3 | `has_employee_context` too restrictive for create/add | `main.py:1601` | "create" commands don't reference existing employees, so context check failed |
+
+**Fixes Applied**:
+
+**Fix 1** - Skip multi-query detection for ALL CRUD commands (Line 1017-1021):
+```python
+# BEFORE (broken):
+is_create_command = prompt.lower().strip().startswith("create ")
+if detect_multi_query(prompt) and len(prompt) > 50 and not is_create_command:
+
+# AFTER (fixed):
+_crud_starters = ["create ", "update ", "delete ", "remove ", "add ", "change ", "modify ", "set "]
+is_crud_command = any(_prompt_lower_mq.startswith(s) for s in _crud_starters)
+if detect_multi_query(prompt) and len(prompt) > 50 and not is_crud_command:
+```
+
+**Fix 2** - Extend name-based lookup to ALL CRUD operations (Line 1606-1634):
+```python
+# BEFORE (broken - only delete/remove):
+if not has_employee_context and any(kw in prompt.lower() for kw in ["delete", "remove"]):
+
+# AFTER (fixed - all CRUD):
+if not has_employee_context and is_crud:
+```
+
+**Fix 3** - Auto-set employee context for create/add commands (Line 1627-1631):
+```python
+# NEW: Create/add don't need existing employee names
+if not has_employee_context and any(kw in prompt_lower_check_crud for kw in ["create", "add"]):
+    has_employee_context = True
+```
+
+### BUG-002: Resume Validation Rejecting Valid Resumes
+**Date**: February 2026
+**Severity**: High
+**Symptoms**: `create` command with pasted resume text returned "not_a_resume" error.
+
+**Root Cause**: Email/phone regex patterns used `^...$` anchors, which only match entire strings, not patterns within text.
+
+**Fix** (validators.py Lines 250-251):
+```python
+# BEFORE (broken):
+email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+
+# AFTER (fixed):
+email_search_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+```
+
+### BUG-003: Image Uploads Failing with "not_a_resume"
+**Date**: February 2026
+**Severity**: Medium
+**Symptoms**: OCR-extracted text from images didn't meet resume validation threshold.
+
+**Fix** (main.py): Added lenient validation for images since OCR text is imperfect:
+```python
+if is_image and not resume_validation.is_valid:
+    if len(pdf_text.strip()) > 100 and resume_validation.confidence >= 0.15:
+        resume_validation = ValidationResult(is_valid=True, ...)
+```
+
+### BUG-004: AttributeError 'ExtractionResult' has no attribute 'warnings'
+**Date**: February 2026
+**Severity**: Medium
+**Symptoms**: Server crash on resume upload.
+
+**Fix**: Changed `validation_result.warnings` to `validation_result.validation_warnings`.
+
+### BUG-005: "Show All Employees" Only Showing 5 Records
+**Date**: February 2026
+**Severity**: Low
+**Symptoms**: Character limit `[:8000]` truncated employee list data.
+
+**Fix**: Removed the character limit for list queries.
+
+---
+
 *Document created: February 2026*
+*Last updated: February 2026*
 *System: EMS 2.0 - Employee Management System*

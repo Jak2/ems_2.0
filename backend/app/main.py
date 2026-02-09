@@ -1012,10 +1012,13 @@ async def chat(request: Request, req: ChatRequest | None = None):
     # MULTI-QUERY DETECTION AND HANDLING
     # Detects complex queries with multiple tasks and processes them
     # Example: "what skills does X have and compare with Y"
-    # NOTE: Skip for "create" commands - they contain resume text with many "and" words
+    # NOTE: Skip for CRUD commands - they contain data/names with "and" words
+    # that trigger false positives in multi-query detection
     # =====================================================
-    is_create_command = prompt.lower().strip().startswith("create ")
-    if detect_multi_query(prompt) and len(prompt) > 50 and not is_create_command:
+    _prompt_lower_mq = prompt.lower().strip()
+    _crud_starters = ["create ", "update ", "delete ", "remove ", "add ", "change ", "modify ", "set "]
+    is_crud_command = any(_prompt_lower_mq.startswith(s) for s in _crud_starters)
+    if detect_multi_query(prompt) and len(prompt) > 50 and not is_crud_command:
         logger.info(f"[CHAT] *** MULTI-QUERY DETECTED ***")
         try:
             # Step 1: Decompose the query into sub-tasks using LLM
@@ -1600,23 +1603,32 @@ Be concise and factual."""
     # Also check if any employee name from the database is mentioned in the prompt
     has_employee_context = any(word in prompt.lower() for word in ["employee", "record", "person", "user", "from", "to", "candidate", "resume", "cv"])
 
-    # For delete/remove commands, also try to find employee by name in DB
-    if not has_employee_context and any(kw in prompt.lower() for kw in ["delete", "remove"]):
-        # Check if any employee name is mentioned
+    # For ALL CRUD commands, also try to find employee by name in DB
+    # Previously this only ran for delete/remove - now runs for update/create/change/modify too
+    if not has_employee_context and is_crud:
+        # Check if any employee name is mentioned in the prompt
         try:
             from sqlalchemy.orm import Session as TempSession
             temp_db: TempSession = SessionLocal()
             all_emps = temp_db.query(models.Employee).all()
+            prompt_lower_check_crud = prompt.lower()
             for e in all_emps:
-                if e.name and e.name.lower() in prompt.lower():
+                if e.name and e.name.lower() in prompt_lower_check_crud:
                     has_employee_context = True
                     break
-                # Also check partial name match
+                # Also check partial name match (first name or last name)
                 if e.name:
                     for part in e.name.lower().split():
-                        if len(part) > 2 and part in prompt.lower():
+                        if len(part) > 2 and part in prompt_lower_check_crud:
                             has_employee_context = True
                             break
+                if has_employee_context:
+                    break
+            # If still no context and it's a create command, auto-set context
+            # since "create" doesn't always need an existing employee name
+            if not has_employee_context and any(kw in prompt_lower_check_crud for kw in ["create", "add"]):
+                has_employee_context = True
+                logger.info(f"[CHAT] → Auto-setting employee context for create/add command")
             temp_db.close()
         except Exception:
             pass

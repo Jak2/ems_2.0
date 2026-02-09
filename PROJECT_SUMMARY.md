@@ -87,6 +87,7 @@ Response to User
 | Image-based resumes | Tesseract OCR with multiple PSM modes |
 | Ambiguous queries | Context-aware pronoun resolution |
 | Duplicate employees | Identity verification with user disambiguation |
+| CRUD routing failures | Multi-query bypass + expanded employee context detection |
 
 ---
 
